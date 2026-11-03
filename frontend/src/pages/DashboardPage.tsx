@@ -1,10 +1,11 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { Plus, FileText, Image, Clock, CheckCircle, AlertCircle, RefreshCw, Trash2 } from 'lucide-react'
-import { jobsApi } from '../api/services'
+import { Plus, FileText, Image, Clock, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react'
+import { useJobPolling, useJobsList, useJobActions } from '../hooks/useJobs'
 import type { JobResponse, JobStatus } from '../api/types'
 import { formatDistanceToNow } from 'date-fns'
 import clsx from 'clsx'
+import { FreeModelNotice } from '../components/FreeModelNotice'
 
 const statusConfig: Record<JobStatus, { label: string; icon: React.ComponentType<{ className?: string }>; color: string }> = {
   pending: { label: 'Queued', icon: Clock, color: 'gray' },
@@ -30,13 +31,32 @@ const statusColors: Record<string, string> = {
   red: 'bg-red-100 text-red-700',
 }
 
-export function DashboardPage() {
-  const { data: jobsResponse, isLoading, error, refetch } = useQuery({
-    queryKey: ['jobs'],
-    queryFn: () => jobsApi.list({ page_size: 20 }),
-  })
+const ACTIVE_STATUSES: JobStatus[] = [
+  'pending',
+  'expanding_prompt',
+  'writing_text',
+  'generating_image',
+  'safety_check',
+  'adapting',
+  'regenerating',
+]
 
-  const jobs = jobsResponse?.data?.jobs || []
+export function DashboardPage() {
+  const { jobs, total, isLoading, error, refetch } = useJobsList({ page_size: 20 })
+  const { cancelJob } = useJobActions()
+  const [showFreeModelNotice, setShowFreeModelNotice] = useState(true)
+
+  // Poll for active jobs
+  const activeJob = jobs.find((j) => ACTIVE_STATUSES.includes(j.status))
+  const { job: polledJob } = useJobPolling(activeJob?.id || null, !!activeJob)
+
+  // Merge polled job data
+  const displayJobs = jobs.map((job) => {
+    if (polledJob && polledJob.id === job.id) {
+      return polledJob
+    }
+    return job
+  })
 
   const getStatusConfig = (status: JobStatus) => statusConfig[status] || statusConfig.pending
 
@@ -54,10 +74,7 @@ export function DashboardPage() {
         <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
         <h2 className="text-lg font-medium text-gray-900">Failed to load jobs</h2>
         <p className="mt-1 text-gray-500">{(error as Error).message}</p>
-        <button
-          onClick={() => refetch()}
-          className="mt-4 btn-primary"
-        >
+        <button onClick={() => refetch()} className="mt-4 btn-primary">
           Try again
         </button>
       </div>
@@ -66,6 +83,12 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-6">
+      {/* Free Model Notice */}
+      <FreeModelNotice 
+        isVisible={showFreeModelNotice} 
+        onDismiss={() => setShowFreeModelNotice(false)} 
+      />
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -121,18 +144,15 @@ export function DashboardPage() {
         <div className="p-6 border-b border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Recent Generations</h2>
-            <p className="text-sm text-gray-500">{jobs.length} jobs total</p>
+            <p className="text-sm text-gray-500">{total} jobs total</p>
           </div>
-          <button
-            onClick={() => refetch()}
-            className="btn-secondary"
-          >
+          <button onClick={() => refetch()} className="btn-secondary">
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
           </button>
         </div>
 
-        {jobs.length === 0 ? (
+        {displayJobs.length === 0 ? (
           <div className="p-12 text-center">
             <Image className="h-16 w-16 text-gray-300 mx-auto mb-4" />
             <h3 className="text-lg font-medium text-gray-900">No generations yet</h3>
@@ -161,9 +181,10 @@ export function DashboardPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {jobs.map((job) => {
+                {displayJobs.map((job) => {
                   const config = getStatusConfig(job.status)
                   const Icon = config.icon
+                  const isActive = ACTIVE_STATUSES.includes(job.status)
                   return (
                     <tr key={job.id} className="hover:bg-gray-50">
                       <td className="px-6 py-4">
@@ -187,7 +208,10 @@ export function DashboardPage() {
                         <div className="w-24">
                           <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                             <div
-                              className="h-full bg-primary-600 transition-all duration-300"
+                              className={clsx(
+                                "h-full transition-all duration-300",
+                                isActive ? "bg-primary-600 animate-pulse" : "bg-primary-600"
+                              )}
                               style={{ width: `${job.progress}%` }}
                             />
                           </div>
@@ -200,23 +224,17 @@ export function DashboardPage() {
                       <td className="px-6 py-4 text-right">
                         <div className="flex items-center justify-end gap-2">
                           {job.status === 'awaiting_review' && (
-                            <Link
-                              to={`/review/${job.id}`}
-                              className="btn-primary text-sm"
-                            >
+                            <Link to={`/review/${job.id}`} className="btn-primary text-sm">
                               Review
                             </Link>
                           )}
                           {['published', 'failed'].includes(job.status) && (
-                            <Link
-                              to={`/review/${job.id}`}
-                              className="btn-secondary text-sm"
-                            >
+                            <Link to={`/review/${job.id}`} className="btn-secondary text-sm">
                               View
                             </Link>
                           )}
-                          {['pending', 'expanding_prompt', 'writing_text', 'generating_image', 'safety_check', 'adapting', 'regenerating'].includes(job.status) && (
-                            <button className="btn-secondary text-sm">
+                          {isActive && (
+                            <button className="btn-secondary text-sm" disabled>
                               <RefreshCw className="h-4 w-4 animate-spin" />
                             </button>
                           )}

@@ -1,15 +1,16 @@
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { useState, useEffect } from 'react'
 import { 
-  ArrowLeft, CheckCircle, RotateCcw, Edit2, Image, 
+  ArrowLeft, CheckCircle, RotateCcw, Image, 
   Loader2, AlertCircle, ChevronDown, ChevronUp,
-  Copy, Check, Hash, Type, Layout, Send
+  Copy, Hash, Layout, Send
 } from 'lucide-react'
-import { reviewApi, publishApi } from '../api/services'
-import type { ReviewResponse, RegenerateRequest, ApproveRequest, Platform, PlatformContent } from '../api/types'
+import { useReview, useRegenerate, useApprove, createInitialEditedTexts } from '../hooks/useReview'
+import type { RegenerateRequest, ApproveRequest, Platform, PlatformContent } from '../api/types'
 import clsx from 'clsx'
 import { format } from 'date-fns'
+import { FreeModelNotice } from '../components/FreeModelNotice'
 
 const PLATFORM_COLORS: Record<Platform, string> = {
   instagram: 'bg-gradient-to-r from-purple-500 to-pink-500',
@@ -41,49 +42,30 @@ export function ReviewPage() {
   const [showRegenerate, setShowRegenerate] = useState(false)
   const [regenerateFeedback, setRegenerateFeedback] = useState('')
   const [scheduleAt, setScheduleAt] = useState<Date | null>(null)
+  const [showFreeModelNotice, setShowFreeModelNotice] = useState(true)
 
-  const { data: reviewResponse, isLoading, error, refetch } = useQuery({
-    queryKey: ['review', jobId],
-    queryFn: () => reviewApi.get(jobId!),
-    enabled: !!jobId,
-  })
+  // Handle undefined jobId
+  const jobIdString = jobId ?? null
 
-  const regenerateMutation = useMutation({
-    mutationFn: (data: RegenerateRequest) => reviewApi.regenerate(jobId!, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['review', jobId] })
-      setShowRegenerate(false)
-      setRegenerateFeedback('')
-    },
-  })
+  const { review, isLoading, error, refetch } = useReview(jobIdString)
+  const regenerateMutation = useRegenerate(jobIdString)
+  const approveMutation = useApprove(jobIdString)
 
-  const approveMutation = useMutation({
-    mutationFn: (data: ApproveRequest) => reviewApi.approve(jobId!, data),
-    onSuccess: (response) => {
-      navigate(`/publish/${response.data.id}`)
-    },
-  })
-
-  const reviewData = reviewResponse?.data
-  const content = reviewData?.content
+  const content = review?.content
 
   // Initialize selected image
-  if (content && !selectedImageId && content.primary_image_id) {
-    setSelectedImageId(content.primary_image_id)
-  }
+  useEffect(() => {
+    if (content && !selectedImageId && content.primary_image_id) {
+      setSelectedImageId(content.primary_image_id)
+    }
+  }, [content, selectedImageId])
 
   // Initialize edited texts
-  if (content && Object.keys(editedTexts).length === 0) {
-    const initial: Record<Platform, string> = {
-      instagram: '',
-      facebook: '',
-      linkedin: '',
+  useEffect(() => {
+    if (content && Object.keys(editedTexts).length === 0) {
+      setEditedTexts(createInitialEditedTexts(content.platform_contents))
     }
-    content.platform_contents.forEach((pc) => {
-      initial[pc.platform] = pc.text
-    })
-    setEditedTexts(initial)
-  }
+  }, [content])
 
   if (isLoading) {
     return (
@@ -154,6 +136,12 @@ export function ReviewPage() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
+      {/* Free Model Notice */}
+      <FreeModelNotice 
+        isVisible={showFreeModelNotice} 
+        onDismiss={() => setShowFreeModelNotice(false)} 
+      />
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <button
@@ -235,13 +223,13 @@ export function ReviewPage() {
         </div>
       )}
 
-      {!showRegenerate && reviewData?.can_regenerate && reviewData?.regeneration_count < reviewData?.max_regenerations && (
+      {!showRegenerate && review?.can_regenerate && review?.regeneration_count < review?.max_regenerations && (
         <button
           onClick={() => setShowRegenerate(true)}
           className="btn-secondary w-full sm:w-auto"
         >
           <RotateCcw className="h-4 w-4 mr-2" />
-          Regenerate ({reviewData?.regeneration_count}/{reviewData?.max_regenerations})
+          Regenerate ({review?.regeneration_count}/{review?.max_regenerations})
         </button>
       )}
 
