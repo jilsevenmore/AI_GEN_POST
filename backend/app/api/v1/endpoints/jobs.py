@@ -12,6 +12,9 @@ from app.schemas.common import (
 from app.core.dependencies import get_current_user, get_current_company
 from app.models.job import Job
 from app.models.user import User
+from app.models.brand_kit import BrandKit
+from app.services.ai.graph import run_generation_job
+from app.services.ai.state import JobInput, BrandKitData
 
 router = APIRouter()
 
@@ -46,8 +49,47 @@ async def create_job(
     await db.commit()
     await db.refresh(job)
     
-    # TODO: Start background worker (Phase 3)
-    # background_tasks.add_task(run_generation_job, job.id)
+    # Get brand kit for AI generation
+    brand_result = await db.execute(
+        select(BrandKit).where(BrandKit.company_id == current_company.id)
+    )
+    brand_kit_model = brand_result.scalar_one_or_none()
+    
+    if not brand_kit_model:
+        # Create default brand kit
+        brand_kit_model = BrandKit(company_id=current_company.id, company_name=current_company.name)
+        db.add(brand_kit_model)
+        await db.commit()
+        await db.refresh(brand_kit_model)
+    
+    # Convert to AI service types
+    job_input = JobInput(
+        job_id=job.id,
+        type=job_data.type,
+        title=job_data.title,
+        topic=job_data.topic,
+        tone=job_data.tone,
+        audience=job_data.audience,
+        keywords=job_data.keywords,
+        image_description=job_data.image_description,
+        platforms=[p.value for p in job_data.platforms],
+        use_references=job_data.use_references,
+        reference_image_ids=job_data.reference_image_ids,
+    )
+    
+    brand_kit_data = BrandKitData(
+        company_name=brand_kit_model.company_name,
+        tagline=brand_kit_model.tagline,
+        address=brand_kit_model.address,
+        logo_url=str(brand_kit_model.logo_url) if brand_kit_model.logo_url else None,
+        primary_color=brand_kit_model.primary_color,
+        secondary_color=brand_kit_model.secondary_color,
+        tone=brand_kit_model.tone,
+        use_openai_only=brand_kit_model.use_openai_only,
+    )
+    
+    # Start background generation
+    background_tasks.add_task(run_generation_job, job_input, brand_kit_data, db)
     
     return JobResponse.model_validate(job)
 
@@ -61,18 +103,15 @@ async def list_jobs(
     db: AsyncSession = Depends(get_db),
 ):
     """List company's generation jobs with pagination."""
-    # Build query with company scoping
     query = select(Job).where(Job.company_id == current_company.id)
     
     if status_filter:
         query = query.where(Job.status == status_filter.value)
     
-    # Get total count
     count_query = select(func.count()).select_from(query.subquery())
     total_result = await db.execute(count_query)
     total = total_result.scalar()
     
-    # Get paginated results
     query = query.order_by(Job.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
     jobs = result.scalars().all()
@@ -129,7 +168,7 @@ async def cancel_job(
     return None
 
 
-# Mock background job simulation (for frontend testing)
+# Keep simulate-progress for testing (can remove later)
 @router.post("/{job_id}/simulate-progress", response_model=JobResponse)
 async def simulate_job_progress(
     job_id: UUID,
@@ -159,7 +198,6 @@ async def simulate_job_progress(
         job.progress = progress
         job.current_step = step
         job.updated_at = datetime.now(timezone.utc)
-        # In real implementation, this would be streamed via SSE/WebSocket
     
     await db.commit()
     await db.refresh(job)

@@ -13,6 +13,7 @@ from app.schemas.common import (
 from app.core.dependencies import get_current_company
 from app.models.job import Job
 from app.models.content import Content
+from app.services.ai.graph import resume_after_review
 
 router = APIRouter()
 
@@ -24,7 +25,6 @@ async def get_review(
     db: AsyncSession = Depends(get_db),
 ):
     """Get generated content for review (approve/regenerate)."""
-    # Get job with company scoping
     job_result = await db.execute(
         select(Job).where(Job.id == job_id, Job.company_id == current_company.id)
     )
@@ -33,7 +33,6 @@ async def get_review(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    # Get content
     content_result = await db.execute(
         select(Content).where(Content.job_id == job_id)
     )
@@ -42,8 +41,8 @@ async def get_review(
     if not content:
         raise HTTPException(status_code=404, detail="Content not found for this job")
     
-    # Count regenerations (based on content updates)
-    regen_count = 0  # TODO: Track properly in Phase 3
+    # Count regenerations from job metadata
+    regen_count = getattr(job, 'regeneration_count', 0)
     
     return ReviewResponse(
         job_id=job_id,
@@ -61,8 +60,7 @@ async def regenerate_content(
     current_company = Depends(get_current_company),
     db: AsyncSession = Depends(get_db),
 ):
-    """Regenerate content with user feedback."""
-    # Get job with company scoping
+    """Regenerate content with user feedback using AI graph."""
     job_result = await db.execute(
         select(Job).where(Job.id == job_id, Job.company_id == current_company.id)
     )
@@ -71,35 +69,61 @@ async def regenerate_content(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
+    if job.status not in [JobStatus.awaiting_review, JobStatus.regenerating]:
+        raise HTTPException(status_code=400, detail="Job not in a state that allows regeneration")
+    
+    # Check regeneration limit
+    regen_count = getattr(job, 'regeneration_count', 0)
+    if regen_count >= 3:
+        raise HTTPException(status_code=400, detail="Maximum regenerations reached")
+    
     # Update job status
     job.status = JobStatus.regenerating
     job.current_step = "Regenerating with feedback..."
     job.updated_at = datetime.now(timezone.utc)
     await db.commit()
     
-    # TODO: Implement real regeneration with LangGraph (Phase 3)
-    # For now, return existing content
-    content_result = await db.execute(
-        select(Content).where(Content.job_id == job_id)
-    )
-    content = content_result.scalar_one_or_none()
-    
-    if not content:
-        raise HTTPException(status_code=404, detail="Content not found")
-    
-    # Reset job status for review
-    job.status = JobStatus.awaiting_review
-    job.current_step = "Ready for review"
-    job.updated_at = datetime.now(timezone.utc)
-    await db.commit()
-    
-    return ReviewResponse(
-        job_id=job_id,
-        content=ContentResponse.model_validate(content),
-        can_regenerate=True,
-        regeneration_count=1,
-        max_regenerations=3,
-    )
+    # Run regeneration via AI graph
+    try:
+        final_state = await resume_after_review(
+            job_id=str(job_id),
+            feedback=request.feedback,
+            regenerate_text=request.regenerate_text,
+            regenerate_image=request.regenerate_image,
+            new_reference_ids=request.reference_image_ids,
+            db=db,
+        )
+        
+        # Get updated content
+        content_result = await db.execute(
+            select(Content).where(Content.job_id == job_id)
+        )
+        content = content_result.scalar_one_or_none()
+        
+        if not content:
+            raise HTTPException(status_code=404, detail="Content not found after regeneration")
+        
+        # Update regeneration count
+        job.regeneration_count = regen_count + 1
+        job.status = JobStatus.awaiting_review
+        job.current_step = "Ready for review"
+        job.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        
+        return ReviewResponse(
+            job_id=job_id,
+            content=ContentResponse.model_validate(content),
+            can_regenerate=job.regeneration_count < 3,
+            regeneration_count=job.regeneration_count,
+            max_regenerations=3,
+        )
+        
+    except Exception as e:
+        job.status = JobStatus.failed
+        job.error = f"Regeneration failed: {str(e)}"
+        job.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{job_id}/approve", response_model=ContentResponse)
@@ -110,7 +134,6 @@ async def approve_content(
     db: AsyncSession = Depends(get_db),
 ):
     """Approve content and move to publishing."""
-    # Get job with company scoping
     job_result = await db.execute(
         select(Job).where(Job.id == job_id, Job.company_id == current_company.id)
     )
@@ -119,7 +142,6 @@ async def approve_content(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    # Get content
     content_result = await db.execute(
         select(Content).where(Content.job_id == job_id)
     )

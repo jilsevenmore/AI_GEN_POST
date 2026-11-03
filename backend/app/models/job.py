@@ -33,6 +33,7 @@ class Job(Base):
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     current_step: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    regeneration_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
