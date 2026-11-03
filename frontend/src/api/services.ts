@@ -89,3 +89,11 @@ export const healthApi = {
   redis: () => api.get('/health/redis'),
   all: () => api.get('/health/all'),
 }
+
+// Legal
+export const legalApi = {
+  getPrivacy: () => api.get('/legal/privacy', { responseType: 'text' }),
+  getTerms: () => api.get('/legal/terms', { responseType: 'text' }),
+  getPrivacyMarkdown: () => api.get<{ markdown: string }>('/legal/privacy/markdown'),
+  getTermsMarkdown: () => api.get<{ markdown: string }>('/legal/terms/markdown'),
+}

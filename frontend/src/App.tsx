@@ -9,6 +9,7 @@ import { LibraryPage } from './pages/LibraryPage'
 import { BrandKitPage } from './pages/BrandKitPage'
 import { PublishPage } from './pages/PublishPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { LegalPage } from './pages/LegalPage'
 import { useAuth } from './hooks/useAuth'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -73,6 +74,7 @@ export default function App() {
         <Route path="brand" element={<BrandKitPage />} />
         <Route path="publish/:contentId" element={<PublishPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="legal/:page" element={<LegalPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>

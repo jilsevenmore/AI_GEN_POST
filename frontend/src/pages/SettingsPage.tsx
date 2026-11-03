@@ -4,7 +4,7 @@ import { useAuth } from '../hooks/useAuth'
 import { 
   User, Key, Shield, Globe, Send, Database, 
   Loader2, AlertCircle, CheckCircle, ExternalLink,
-  ChevronRight, Trash2, Image
+  ChevronRight, Trash2, Image, FileText
 } from 'lucide-react'
 import { publishApi, authApi } from '../api/services'
 import type { ChannelConnection } from '../api/types'
@@ -31,7 +31,7 @@ const PlatformIcon = ({ platform, className }: { platform: string; className?: s
 export function SettingsPage() {
   const { user, logout } = useAuth()
   const queryClient = useQueryClient()
-  const [activeTab, setActiveTab] = useState<'account' | 'channels' | 'security' | 'integrations'>('account')
+  const [activeTab, setActiveTab] = useState<'account' | 'channels' | 'security' | 'integrations' | 'legal'>('account')
   const [disconnectingChannel, setDisconnectingChannel] = useState<string | null>(null)
 
   const { data: channelsResponse, isLoading: channelsLoading } = useQuery({
@@ -86,6 +86,7 @@ export function SettingsPage() {
               { id: 'channels', label: 'Channels', icon: Send },
               { id: 'security', label: 'Security', icon: Shield },
               { id: 'integrations', label: 'Integrations', icon: Globe },
+              { id: 'legal', label: 'Legal', icon: FileText },
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -283,6 +284,71 @@ export function SettingsPage() {
                     </div>
                     <ChevronRight className="h-5 w-5 text-gray-400" />
                   </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'legal' && (
+            <div className="space-y-6">
+              <div className="card p-4 bg-gray-50 border-gray-200">
+                <div className="flex items-start gap-3">
+                  <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-primary-100 flex items-center justify-center">
+                    <FileText className="h-5 w-5 text-primary-600" />
+                  </div>
+                  <div>
+                    <h3 className="font-medium text-gray-900">Legal Documents</h3>
+                    <p className="text-sm text-gray-600 mt-1">
+                      Review our privacy policy and terms of service
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <button
+                  onClick={() => window.open('/legal/privacy', '_blank')}
+                  className="card p-6 hover:shadow-md transition-shadow border border-gray-200"
+                >
+                  <div className="w-12 h-12 rounded-lg bg-primary-100 flex items-center justify-center mb-4">
+                    <Shield className="h-6 w-6 text-primary-600" />
+                  </div>
+                  <h3 className="font-semibold text-gray-900">Privacy Policy</h3>
+                  <p className="mt-1 text-sm text-gray-500">How we collect, use, and protect your data</p>
+                  <div className="mt-4 flex items-center gap-2 text-primary-600 text-sm font-medium">
+                    <ExternalLink className="h-4 w-4" />
+                    View Policy
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => window.open('/legal/terms', '_blank')}
+                  className="card p-6 hover:shadow-md transition-shadow border border-gray-200"
+                >
+                  <div className="w-12 h-12 rounded-lg bg-blue-100 flex items-center justify-center mb-4">
+                    <FileText className="h-6 w-6 text-blue-600" />
+                  </div>
+                  <h3 className="font-semibold text-gray-900">Terms of Service</h3>
+                  <p className="mt-1 text-sm text-gray-500">Rules and guidelines for using the service</p>
+                  <div className="mt-4 flex items-center gap-2 text-blue-600 text-sm font-medium">
+                    <ExternalLink className="h-4 w-4" />
+                    View Terms
+                  </div>
+                </button>
+              </div>
+
+              <div className="card p-4 border-l-4 border-amber-500 bg-amber-50">
+                <div className="flex items-start gap-3">
+                  <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center">
+                    <AlertCircle className="h-5 w-5 text-amber-600" />
+                  </div>
+                  <div>
+                    <h4 className="font-medium text-amber-900">Important Notice</h4>
+                    <p className="text-sm text-amber-800 mt-1">
+                      When using free OpenRouter models, your prompts and brand data may be logged by the model providers for model improvement. 
+                      Enable <strong>"OpenAI Only" mode</strong> in the Brand Kit to route all generation through OpenAI's paid API instead.
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>

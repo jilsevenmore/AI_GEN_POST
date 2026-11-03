@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, jobs, review, publish, library, brand, health
+from app.api.v1.endpoints import auth, jobs, review, publish, library, brand, health, legal
 
 api_router = APIRouter()
 
@@ -23,3 +23,6 @@ api_router.include_router(library.router, prefix="/library", tags=["Library"])
 
 # Brand Kit
 api_router.include_router(brand.router, prefix="/brand", tags=["Brand"])
+
+# Legal
+api_router.include_router(legal.router, prefix="/legal", tags=["Legal"])
