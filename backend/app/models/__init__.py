@@ -8,6 +8,7 @@ from app.models.image import Image
 from app.models.channel import ChannelConnection
 from app.models.publish import PublishAttempt
 from app.models.quota import Quota
+from app.models.beta import BetaUser, BetaFeedback, OnboardingStep, BetaMetrics
 
 __all__ = [
     "Company",
@@ -19,4 +20,8 @@ __all__ = [
     "ChannelConnection",
     "PublishAttempt",
     "Quota",
+    "BetaUser",
+    "BetaFeedback",
+    "OnboardingStep",
+    "BetaMetrics",
 ]

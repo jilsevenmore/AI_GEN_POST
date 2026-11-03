@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, jobs, review, publish, library, brand, health, legal
+from app.api.v1.endpoints import auth, jobs, review, publish, library, brand, health, legal, beta
 
 api_router = APIRouter()
 
@@ -26,3 +26,6 @@ api_router.include_router(brand.router, prefix="/brand", tags=["Brand"])
 
 # Legal
 api_router.include_router(legal.router, prefix="/legal", tags=["Legal"])
+
+# Beta Program
+api_router.include_router(beta.router, prefix="/beta", tags=["Beta"])

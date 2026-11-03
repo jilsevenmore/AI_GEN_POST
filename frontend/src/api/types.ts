@@ -267,3 +267,104 @@ export interface ErrorDetail {
 export interface ErrorResponse {
   error: ErrorDetail
 }
+
+// Beta
+export type BetaUserStatus = 'invited' | 'active' | 'inactive' | 'completed' | 'churned'
+export type FeedbackType = 'bug' | 'feature_request' | 'usability' | 'content_quality' | 'performance' | 'general'
+export type FeedbackPriority = 'low' | 'medium' | 'high' | 'critical'
+
+export interface BetaUserInvite {
+  email: string
+  name?: string
+}
+
+export interface BetaUserResponse extends IDMixin, TimestampMixin {
+  email: string
+  name?: string
+  status: BetaUserStatus
+  invited_at: string
+  activated_at?: string
+  first_post_at?: string
+  last_active_at?: string
+  total_posts: number
+  total_regenerations: number
+  feedback_count: number
+  nps_score?: number
+}
+
+export interface BetaFeedbackSubmit {
+  type: FeedbackType
+  title: string
+  description: string
+  priority?: FeedbackPriority
+  context?: Record<string, any>
+}
+
+export interface BetaFeedbackResponse extends IDMixin, TimestampMixin {
+  beta_user_id: UUID
+  type: FeedbackType
+  priority: FeedbackPriority
+  title: string
+  description: string
+  context?: Record<string, any>
+  status: string
+}
+
+export interface OnboardingStepResponse extends IDMixin, TimestampMixin {
+  beta_user_id: UUID
+  step_key: string
+  step_name: string
+  step_order: number
+  completed: boolean
+  completed_at?: string
+  skipped: boolean
+  time_spent_seconds: number
+}
+
+export interface OnboardingProgressResponse {
+  total_steps: number
+  completed_steps: number
+  progress_percent: number
+  steps: Array<{
+    step_key: string
+    step_name: string
+    step_order: number
+    completed: boolean
+    completed_at?: string
+    time_spent_seconds: number
+  }>
+}
+
+export interface BetaMetricsResponse extends IDMixin, TimestampMixin {
+  date: string
+  company_id: UUID
+  total_generations: number
+  approved_generations: number
+  rejected_generations: number
+  total_regenerations: number
+  avg_time_to_first_post: number
+  avg_time_to_approve: number
+  avg_regenerations_per_post: number
+  total_publishes: number
+  successful_publishes: number
+  failed_publishes: number
+  total_spend_usd: number
+  free_requests_used: number
+  openai_fallbacks: number
+  active_users: number
+  new_users: number
+  churned_users: number
+}
+
+export interface BetaDashboardResponse {
+  summary: Record<string, any>
+  generation_metrics: Record<string, any>
+  publish_metrics: Record<string, any>
+  recent_feedback: Array<{
+    id: UUID
+    type: FeedbackType
+    priority: FeedbackPriority
+    title: string
+    created_at: string
+  }>
+}

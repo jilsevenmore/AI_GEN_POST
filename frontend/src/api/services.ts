@@ -97,3 +97,26 @@ export const legalApi = {
   getPrivacyMarkdown: () => api.get<{ markdown: string }>('/legal/privacy/markdown'),
   getTermsMarkdown: () => api.get<{ markdown: string }>('/legal/terms/markdown'),
 }
+
+// Beta
+export const betaApi = {
+  // Users
+  inviteUser: (data: { email: string; name?: string }) => api.post('/beta/invite', data),
+  listUsers: (params?: { status?: string }) => api.get('/beta/users', { params }),
+  getUser: (userId: string) => api.get(`/beta/users/${userId}`),
+  activateUser: (userId: string) => api.post(`/beta/users/${userId}/activate`),
+  
+  // Onboarding
+  getOnboardingProgress: (userId: string) => api.get(`/beta/users/${userId}/onboarding`),
+  completeOnboardingStep: (userId: string, stepKey: string, timeSpentSeconds?: number) => 
+    api.post(`/beta/users/${userId}/onboarding/${stepKey}/complete`, { time_spent_seconds: timeSpentSeconds }),
+  
+  // Feedback
+  submitFeedback: (userId: string, data: { type: string; title: string; description: string; priority?: string; context?: Record<string, any> }) => 
+    api.post(`/beta/users/${userId}/feedback`, data),
+  getUserFeedback: (userId: string) => api.get(`/beta/users/${userId}/feedback`),
+  
+  // Metrics
+  getMetrics: (days?: number) => api.get('/beta/metrics', { params: { days } }),
+  getDashboard: () => api.get('/beta/dashboard'),
+}
