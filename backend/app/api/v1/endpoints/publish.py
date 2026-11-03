@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from typing import List
+from sqlalchemy import select, func, join
+from typing import List, Optional
 from uuid import UUID, uuid4
 from datetime import datetime, timezone
 from app.db.session import get_db
@@ -13,6 +13,8 @@ from app.core.dependencies import get_current_company
 from app.models.channel import ChannelConnection as ChannelConnectionModel
 from app.models.publish import PublishAttempt
 from app.models.content import Content
+from app.services.publisher import get_publisher
+from app.services.publish_queue import get_publishing_queue, PublishJob
 
 router = APIRouter()
 
@@ -41,10 +43,15 @@ async def get_buffer_auth_url(
     db: AsyncSession = Depends(get_db),
 ):
     """Get Buffer OAuth authorization URL."""
-    # TODO: Implement real Buffer OAuth PKCE flow (Phase 6)
-    state = "mock_state_" + str(uuid4())[:8]
+    publisher = get_publisher()
+    state = f"buf_{uuid4().hex[:16]}"
+    
+    # Store state in session or cache for verification
+    # For now, we'll just return the URL
+    authorization_url = await publisher.get_authorization_url(state)
+    
     return BufferConnectResponse(
-        authorization_url=f"https://publish.buffer.com/oauth2/authorize?client_id=mock&redirect_uri=http://localhost:5173/auth/buffer/callback&response_type=code&state={state}",
+        authorization_url=authorization_url,
         state=state,
     )
 
@@ -56,21 +63,27 @@ async def connect_buffer(
     db: AsyncSession = Depends(get_db),
 ):
     """Complete Buffer OAuth connection."""
-    # TODO: Implement real token exchange (Phase 6)
-    # For now, create a mock channel
-    channel = ChannelConnectionModel(
-        company_id=current_company.id,
-        platform=Platform.instagram,
-        external_account_id="ig_new_" + str(uuid4())[:8],
-        account_name="New Instagram Account",
-        access_token_encrypted="encrypted_token_placeholder",
-        is_active=True,
-    )
-    db.add(channel)
-    await db.commit()
-    await db.refresh(channel)
+    publisher = get_publisher()
     
-    return ChannelConnection.model_validate(channel)
+    try:
+        # Exchange code for tokens
+        channel_connection = await publisher.exchange_code(request.code, request.state)
+        
+        # Set company ID
+        channel_connection.company_id = current_company.id
+        
+        db.add(channel_connection)
+        await db.commit()
+        await db.refresh(channel_connection)
+        
+        return ChannelConnection.model_validate(channel_connection)
+        
+    except Exception as e:
+        logger.error(f"Buffer connect failed: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to connect Buffer: {str(e)}"
+        )
 
 
 @router.delete("/buffer/channels/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -80,6 +93,8 @@ async def disconnect_buffer_channel(
     db: AsyncSession = Depends(get_db),
 ):
     """Disconnect a Buffer channel."""
+    publisher = get_publisher()
+    
     result = await db.execute(
         select(ChannelConnectionModel).where(
             ChannelConnectionModel.id == channel_id,
@@ -91,6 +106,10 @@ async def disconnect_buffer_channel(
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
     
+    # Disconnect via publisher
+    await publisher.disconnect(channel)
+    
+    # Delete from database
     await db.delete(channel)
     await db.commit()
     
@@ -116,22 +135,42 @@ async def publish_content(
     if not content:
         raise HTTPException(status_code=404, detail="Content not found")
     
+    # Verify content is approved
+    job_result = await db.execute(
+        select(Content).join(Content.job).where(
+            Content.id == request.content_id,
+            Content.job.has(status="approved")
+        )
+    )
+    if not job_result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Content not approved for publishing")
+    
     # Verify channels exist and belong to company
     channels_result = await db.execute(
         select(ChannelConnectionModel).where(
             ChannelConnectionModel.id.in_(request.channel_ids),
-            ChannelConnectionModel.company_id == current_company.id
+            ChannelConnectionModel.company_id == current_company.id,
+            ChannelConnectionModel.is_active == True
         )
     )
     channels = channels_result.scalars().all()
     
     if len(channels) != len(request.channel_ids):
-        raise HTTPException(status_code=404, detail="One or more channels not found")
+        raise HTTPException(status_code=404, detail="One or more channels not found or inactive")
     
-    # Create publish attempts
+    # Get publisher and queue
+    publisher = get_publisher()
+    queue = get_publishing_queue()
+    
+    # Create publish attempts and queue them
     attempts = []
     for channel in channels:
         idempotency_key = f"publish_{request.content_id}_{channel.id}_{uuid4().hex[:8]}"
+        
+        # Get platform-specific text and image
+        text = publisher._get_platform_text(content, channel.platform)
+        text = publisher._truncate_text(text, channel.platform)
+        image_url = publisher._select_best_image(content, channel.platform)
         
         attempt = PublishAttempt(
             content_id=request.content_id,
@@ -142,6 +181,23 @@ async def publish_content(
             idempotency_key=idempotency_key,
         )
         db.add(attempt)
+        await db.flush()  # Get attempt ID
+        
+        # Create job for queue
+        job = PublishJob(
+            attempt_id=attempt.id,
+            content_id=request.content_id,
+            channel_id=channel.id,
+            platform=channel.platform,
+            text=text,
+            image_url=image_url,
+            schedule_at=request.schedule_at,
+            idempotency_key=idempotency_key,
+        )
+        
+        # Enqueue
+        await queue.enqueue(attempt, channel, content, text, image_url)
+        
         attempts.append(attempt)
     
     await db.commit()
@@ -150,7 +206,8 @@ async def publish_content(
     for attempt in attempts:
         await db.refresh(attempt)
     
-    # TODO: Queue background publishing job (Phase 6)
+    # Ensure queue worker is running
+    queue.start_worker_task()
     
     return [PublishAttemptResponse.model_validate(a) for a in attempts]
 
@@ -204,15 +261,57 @@ async def retry_publish(
     if not attempt:
         raise HTTPException(status_code=404, detail="Publish attempt not found")
     
-    if attempt.status != PublishStatus.failed:
-        raise HTTPException(status_code=400, detail="Can only retry failed attempts")
+    if attempt.status not in [PublishStatus.failed, PublishStatus.retrying]:
+        raise HTTPException(status_code=400, detail="Can only retry failed or retrying attempts")
     
+    # Reset for retry
     attempt.status = PublishStatus.retrying
     attempt.retry_count += 1
     attempt.updated_at = datetime.now(timezone.utc)
+    attempt.error = None
     await db.commit()
     await db.refresh(attempt)
     
-    # TODO: Queue retry job (Phase 6)
+    # Re-queue
+    publisher = get_publisher()
+    queue = get_publishing_queue()
+    
+    channel = await db.get(ChannelConnectionModel, attempt.channel_id)
+    content = await db.get(Content, attempt.content_id)
+    
+    if channel and content:
+        text = publisher._get_platform_text(content, channel.platform)
+        text = publisher._truncate_text(text, channel.platform)
+        image_url = publisher._select_best_image(content, channel.platform)
+        
+        job = PublishJob(
+            attempt_id=attempt.id,
+            content_id=attempt.content_id,
+            channel_id=attempt.channel_id,
+            platform=channel.platform,
+            text=text,
+            image_url=image_url,
+            schedule_at=attempt.scheduled_at,
+            idempotency_key=attempt.idempotency_key,
+            retry_count=attempt.retry_count,
+        )
+        
+        await queue.enqueue(attempt, channel, content, text, image_url)
+        queue.start_worker_task()
     
     return PublishAttemptResponse.model_validate(attempt)
+
+
+@router.get("/queue/stats")
+async def get_queue_stats(
+    current_company = Depends(get_current_company),
+):
+    """Get publishing queue statistics."""
+    queue = get_publishing_queue()
+    stats = await queue.get_queue_stats()
+    return stats
+
+
+# Add logger import
+import logging
+logger = logging.getLogger(__name__)
