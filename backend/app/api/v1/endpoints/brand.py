@@ -1,116 +1,144 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
-from uuid import UUID, uuid4
-from datetime import datetime
+from sqlalchemy import select
+from uuid import UUID
+from datetime import datetime, timezone
 from app.db.session import get_db
 from app.schemas.common import (
     BrandKitCreate, BrandKitUpdate, BrandKitResponse
 )
+from app.core.dependencies import get_current_company
+from app.models.brand_kit import BrandKit
 
 router = APIRouter()
 
-# Mock brand kit store (one per company)
-MOCK_BRAND_KITS = {}
-
 
 @router.get("", response_model=BrandKitResponse)
-async def get_brand_kit(db: AsyncSession = Depends(get_db)):
+async def get_brand_kit(
+    current_company = Depends(get_current_company),
+    db: AsyncSession = Depends(get_db),
+):
     """Get the current company's brand kit."""
-    # TODO: Get company_id from auth
-    company_id = uuid4()  # mock
+    result = await db.execute(
+        select(BrandKit).where(BrandKit.company_id == current_company.id)
+    )
+    brand_kit = result.scalar_one_or_none()
     
-    if company_id not in MOCK_BRAND_KITS:
-        # Return default empty brand kit
-        return BrandKitResponse(
-            id=uuid4(),
-            company_id=company_id,
-            company_name="My Company",
-            tagline=None,
-            address=None,
-            logo_url=None,
-            primary_color="#2563EB",
-            secondary_color="#7C3AED",
-            tone="professional",
-            use_openai_only=False,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+    if not brand_kit:
+        # Create default brand kit
+        brand_kit = BrandKit(
+            company_id=current_company.id,
+            company_name=current_company.name,
         )
+        db.add(brand_kit)
+        await db.commit()
+        await db.refresh(brand_kit)
     
-    return MOCK_BRAND_KITS[company_id]
+    return BrandKitResponse.model_validate(brand_kit)
 
 
 @router.put("", response_model=BrandKitResponse)
 async def upsert_brand_kit(
     brand_data: BrandKitCreate,
+    current_company = Depends(get_current_company),
     db: AsyncSession = Depends(get_db),
 ):
     """Create or update the company's brand kit."""
-    company_id = uuid4()  # from auth
-    
-    brand = BrandKitResponse(
-        id=MOCK_BRAND_KITS.get(company_id, {}).id if company_id in MOCK_BRAND_KITS else uuid4(),
-        company_id=company_id,
-        **brand_data.model_dump(),
-        created_at=MOCK_BRAND_KITS.get(company_id, {}).created_at if company_id in MOCK_BRAND_KITS else datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+    result = await db.execute(
+        select(BrandKit).where(BrandKit.company_id == current_company.id)
     )
-    MOCK_BRAND_KITS[company_id] = brand
-    return brand
+    brand_kit = result.scalar_one_or_none()
+    
+    if brand_kit:
+        # Update existing
+        update_data = brand_data.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(brand_kit, field, value)
+        brand_kit.updated_at = datetime.now(timezone.utc)
+    else:
+        # Create new
+        brand_kit = BrandKit(
+            company_id=current_company.id,
+            **brand_data.model_dump(),
+        )
+        db.add(brand_kit)
+    
+    await db.commit()
+    await db.refresh(brand_kit)
+    
+    return BrandKitResponse.model_validate(brand_kit)
 
 
 @router.patch("", response_model=BrandKitResponse)
 async def update_brand_kit(
     brand_data: BrandKitUpdate,
+    current_company = Depends(get_current_company),
     db: AsyncSession = Depends(get_db),
 ):
     """Partially update the brand kit."""
-    company_id = uuid4()  # from auth
+    result = await db.execute(
+        select(BrandKit).where(BrandKit.company_id == current_company.id)
+    )
+    brand_kit = result.scalar_one_or_none()
     
-    if company_id not in MOCK_BRAND_KITS:
+    if not brand_kit:
         raise HTTPException(status_code=404, detail="Brand kit not found. Create one first.")
     
-    existing = MOCK_BRAND_KITS[company_id]
     update_data = brand_data.model_dump(exclude_unset=True)
-    
     for field, value in update_data.items():
-        setattr(existing, field, value)
+        setattr(brand_kit, field, value)
     
-    existing.updated_at = datetime.utcnow()
-    return existing
+    brand_kit.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(brand_kit)
+    
+    return BrandKitResponse.model_validate(brand_kit)
 
 
 @router.post("/logo", response_model=BrandKitResponse)
 async def upload_logo(
     file: UploadFile = File(...),
+    current_company = Depends(get_current_company),
     db: AsyncSession = Depends(get_db),
 ):
     """Upload company logo (uploads to Cloudinary, returns URL)."""
-    # TODO: Implement real Cloudinary upload
-    company_id = uuid4()  # from auth
+    # TODO: Implement real Cloudinary upload (Phase 5)
+    result = await db.execute(
+        select(BrandKit).where(BrandKit.company_id == current_company.id)
+    )
+    brand_kit = result.scalar_one_or_none()
     
-    if company_id not in MOCK_BRAND_KITS:
+    if not brand_kit:
         raise HTTPException(status_code=404, detail="Brand kit not found. Create one first.")
     
     # Mock: return a placeholder URL
-    logo_url = f"https://res.cloudinary.com/demo/image/upload/v1/logos/{company_id}/{file.filename}"
+    logo_url = f"https://res.cloudinary.com/demo/image/upload/v1/logos/{current_company.id}/{file.filename}"
     
-    existing = MOCK_BRAND_KITS[company_id]
-    existing.logo_url = logo_url
-    existing.updated_at = datetime.utcnow()
+    brand_kit.logo_url = logo_url
+    brand_kit.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(brand_kit)
     
-    return existing
+    return BrandKitResponse.model_validate(brand_kit)
 
 
 @router.delete("/logo", response_model=BrandKitResponse)
-async def delete_logo(db: AsyncSession = Depends(get_db)):
+async def delete_logo(
+    current_company = Depends(get_current_company),
+    db: AsyncSession = Depends(get_db),
+):
     """Remove company logo."""
-    company_id = uuid4()  # from auth
+    result = await db.execute(
+        select(BrandKit).where(BrandKit.company_id == current_company.id)
+    )
+    brand_kit = result.scalar_one_or_none()
     
-    if company_id not in MOCK_BRAND_KITS:
+    if not brand_kit:
         raise HTTPException(status_code=404, detail="Brand kit not found")
     
-    existing = MOCK_BRAND_KITS[company_id]
-    existing.logo_url = None
-    existing.updated_at = datetime.utcnow()
+    brand_kit.logo_url = None
+    brand_kit.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(brand_kit)
     
-    return existing
+    return BrandKitResponse.model_validate(brand_kit)

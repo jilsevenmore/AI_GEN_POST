@@ -23,12 +23,21 @@ const PLATFORM_ICONS: Record<Platform, React.ComponentType<{ className?: string 
   linkedin: Layout,
 }
 
+const PlatformIcon = ({ platform, className }: { platform: Platform; className?: string }) => {
+  const Icon = PLATFORM_ICONS[platform] || Image
+  return <Icon className={className} />
+}
+
 export function ReviewPage() {
   const { jobId } = useParams<{ jobId: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null)
-  const [editedTexts, setEditedTexts] = useState<Record<Platform, string>>({})
+  const [editedTexts, setEditedTexts] = useState<Record<Platform, string>>({
+    instagram: '',
+    facebook: '',
+    linkedin: '',
+  })
   const [showRegenerate, setShowRegenerate] = useState(false)
   const [regenerateFeedback, setRegenerateFeedback] = useState('')
   const [scheduleAt, setScheduleAt] = useState<Date | null>(null)
@@ -55,7 +64,8 @@ export function ReviewPage() {
     },
   })
 
-  const content = reviewResponse?.data?.content
+  const reviewData = reviewResponse?.data
+  const content = reviewData?.content
 
   // Initialize selected image
   if (content && !selectedImageId && content.primary_image_id) {
@@ -225,13 +235,13 @@ export function ReviewPage() {
         </div>
       )}
 
-      {!showRegenerate && content.can_regenerate && content.regeneration_count < content.max_regenerations && (
+      {!showRegenerate && reviewData?.can_regenerate && reviewData?.regeneration_count < reviewData?.max_regenerations && (
         <button
           onClick={() => setShowRegenerate(true)}
           className="btn-secondary w-full sm:w-auto"
         >
           <RotateCcw className="h-4 w-4 mr-2" />
-          Regenerate ({content.regeneration_count}/{content.max_regenerations})
+          Regenerate ({reviewData?.regeneration_count}/{reviewData?.max_regenerations})
         </button>
       )}
 
@@ -309,7 +319,7 @@ export function ReviewPage() {
                     )}
                     disabled
                   >
-                    <PLATFORM_ICONS[pc.platform] className="h-4 w-4" />
+                    <PlatformIcon platform={pc.platform} className="h-4 w-4" />
                     {pc.platform.charAt(0).toUpperCase() + pc.platform.slice(1)}
                     <span className="badge badge-gray">{pc.character_count} chars</span>
                   </button>
@@ -319,7 +329,6 @@ export function ReviewPage() {
 
             <div className="p-4 space-y-6">
               {content.platform_contents.map((pc) => {
-                const PlatformIcon = PLATFORM_ICONS[pc.platform]
                 const currentText = editedTexts[pc.platform] || pc.text
                 const originalText = pc.text
 
@@ -327,7 +336,7 @@ export function ReviewPage() {
                   <div key={pc.platform} className="space-y-3">
                     <div className="flex items-center gap-2">
                       <div className={clsx('w-8 h-8 rounded-lg flex items-center justify-center', PLATFORM_COLORS[pc.platform])}>
-                        <PlatformIcon className="h-4 w-4 text-white" />
+                        <PlatformIcon platform={pc.platform} className="h-4 w-4 text-white" />
                       </div>
                       <h4 className="font-medium text-gray-900 capitalize">{pc.platform}</h4>
                       <span className="badge badge-gray">{currentText.length} chars</span>

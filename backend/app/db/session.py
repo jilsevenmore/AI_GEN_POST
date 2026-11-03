@@ -2,6 +2,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase
 from app.core.config import get_settings
 
+# Import models to register them with Base.metadata
+from app.models import (  # noqa: F401
+    Company,
+    User,
+    BrandKit,
+    Job,
+    Content,
+    Image,
+    ChannelConnection,
+    PublishAttempt,
+    Quota,
+)
+
 settings = get_settings()
 
 engine = create_async_engine(

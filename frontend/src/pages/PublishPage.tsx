@@ -29,6 +29,74 @@ const platformIcons: Record<Platform, React.ComponentType<{ className?: string }
   linkedin: Send,
 }
 
+const PlatformIcon = ({ platform, className }: { platform: Platform; className?: string }) => {
+  const Icon = platformIcons[platform] || Send
+  return <Icon className={className} />
+}
+
+const StatusIcon = ({ status }: { status: PublishStatus }) => {
+  const config = statusConfig[status]
+  return <config.icon className="h-3 w-3" />
+}
+
+interface ChannelListProps {
+  channels: ChannelConnection[]
+  selectedChannels: string[]
+  onToggleChannel: (channelId: string) => void
+  getLatestAttempt: (channelId: string) => PublishAttemptResponse | undefined
+}
+
+const ChannelList = ({ channels, selectedChannels, onToggleChannel, getLatestAttempt }: ChannelListProps) => (
+  <>
+    {channels.map((channel) => {
+      const latestAttempt = getLatestAttempt(channel.id)
+      const isSelected = selectedChannels.includes(channel.id)
+      const status = latestAttempt?.status
+
+      return (
+        <button
+          key={channel.id}
+          onClick={() => onToggleChannel(channel.id)}
+          className={clsx(
+            'w-full flex items-center gap-4 p-4 rounded-lg border-2 transition-all',
+            isSelected
+              ? 'border-primary-500 bg-primary-50'
+              : 'border-gray-200 hover:border-gray-300'
+          )}
+        >
+          <div className={clsx('w-10 h-10 rounded-lg flex items-center justify-center', platformColors[channel.platform])}>
+            <PlatformIcon platform={channel.platform} className="h-5 w-5 text-white" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="font-medium text-gray-900 truncate">{channel.account_name}</p>
+            <p className="text-sm text-gray-500 capitalize">{channel.platform}</p>
+          </div>
+          <div className="flex items-center gap-3">
+            {latestAttempt && (
+              <div className={clsx(
+                'flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium',
+                status === 'sent' && 'bg-green-100 text-green-700',
+                status === 'failed' && 'bg-red-100 text-red-700',
+                status === 'pending' && 'bg-yellow-100 text-yellow-700',
+                status === 'retrying' && 'bg-blue-100 text-blue-700'
+              )}>
+                <StatusIcon status={status!} />
+                {statusConfig[status!]?.label}
+              </div>
+            )}
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={() => onToggleChannel(channel.id)}
+              className="h-5 w-5 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+            />
+          </div>
+        </button>
+      )
+    })}
+  </>
+)
+
 export function PublishPage() {
   const { contentId } = useParams<{ contentId: string }>()
   const navigate = useNavigate()
@@ -138,52 +206,12 @@ export function PublishPage() {
               </button>
             </div>
           ) : (
-            channels.map((channel) => {
-              const latestAttempt = getLatestAttempt(channel.id)
-              const isSelected = selectedChannels.includes(channel.id)
-              const status = latestAttempt?.status
-
-              return (
-                <button
-                  key={channel.id}
-                  onClick={() => toggleChannel(channel.id)}
-                  className={clsx(
-                    'w-full flex items-center gap-4 p-4 rounded-lg border-2 transition-all',
-                    isSelected
-                      ? 'border-primary-500 bg-primary-50'
-                      : 'border-gray-200 hover:border-gray-300'
-                  )}
-                >
-                  <div className={clsx('w-10 h-10 rounded-lg flex items-center justify-center', platformColors[channel.platform])}>
-                    <platformIcons[channel.platform] className="h-5 w-5 text-white" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-gray-900 truncate">{channel.account_name}</p>
-                    <p className="text-sm text-gray-500 capitalize">{channel.platform}</p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    {latestAttempt && (
-                      <div className={clsx(
-                        'flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium',
-                        status === 'sent' && 'bg-green-100 text-green-700',
-                        status === 'failed' && 'bg-red-100 text-red-700',
-                        status === 'pending' && 'bg-yellow-100 text-yellow-700',
-                        status === 'retrying' && 'bg-blue-100 text-blue-700'
-                      )}>
-                        <statusConfig[status!]?.icon className="h-3 w-3" />
-                        {statusConfig[status!]?.label}
-                      </div>
-                    )}
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleChannel(channel.id)}
-                      className="h-5 w-5 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                    />
-                  </div>
-                </button>
-              )
-            )}
+            <ChannelList
+              channels={channels}
+              selectedChannels={selectedChannels}
+              onToggleChannel={toggleChannel}
+              getLatestAttempt={getLatestAttempt}
+            />
           )}
         </div>
       </div>
@@ -277,7 +305,7 @@ export function PublishPage() {
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-3">
                           <div className={clsx('w-8 h-8 rounded-lg flex items-center justify-center', platformColors[channel.platform])}>
-                            <platformIcons[channel.platform] className="h-4 w-4 text-white" />
+                            <PlatformIcon platform={channel.platform} className="h-4 w-4 text-white" />
                           </div>
                           <div>
                             <p className="font-medium text-gray-900">{channel.account_name}</p>
@@ -293,7 +321,7 @@ export function PublishPage() {
                           status === 'pending' && 'bg-yellow-100 text-yellow-700',
                           status === 'retrying' && 'bg-blue-100 text-blue-700'
                         )}>
-                          <statusConfig[status]?.icon className="h-3 w-3" />
+                          <StatusIcon status={status} />
                           {statusConfig[status]?.label}
                         </span>
                       </td>

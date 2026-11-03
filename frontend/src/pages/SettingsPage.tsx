@@ -23,6 +23,11 @@ const platformIcons: Record<string, React.ComponentType<{ className?: string }>>
   linkedin: Send,
 }
 
+const PlatformIcon = ({ platform, className }: { platform: string; className?: string }) => {
+  const Icon = platformIcons[platform] || Send
+  return <Icon className={className} />
+}
+
 export function SettingsPage() {
   const { user, logout } = useAuth()
   const queryClient = useQueryClient()
@@ -175,7 +180,7 @@ export function SettingsPage() {
                     >
                       <div className="flex items-center gap-4">
                         <div className={clsx('w-12 h-12 rounded-lg flex items-center justify-center', platformColors[channel.platform])}>
-                          <platformIcons[channel.platform] className="h-6 w-6 text-white" />
+                          <PlatformIcon platform={channel.platform} className="h-6 w-6 text-white" />
                         </div>
                         <div>
                           <p className="font-medium text-gray-900">{channel.account_name}</p>

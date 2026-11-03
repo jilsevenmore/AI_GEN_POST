@@ -194,7 +194,7 @@ export function LibraryPage() {
                     />
                     {image.is_global && (
                       <div className="absolute top-2 right-2">
-                        <Globe className="h-4 w-4 text-white bg-black/50 rounded-full p-1" title="Global library" />
+                        <Globe className="h-4 w-4 text-white bg-black/50 rounded-full p-1" />
                       </div>
                     )}
                     <div className="absolute bottom-2 left-2 right-2 flex justify-between">

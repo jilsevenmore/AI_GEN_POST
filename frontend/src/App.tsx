@@ -47,7 +47,7 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-export function App() {
+export default function App() {
   return (
     <Routes>
       <Route path="/login" element={
