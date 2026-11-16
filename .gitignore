@@ -107,4 +107,4 @@ backend/run_server.bat
 backend/app/api/v1/endpoints/test_models.py
 
 # Local planning/docs (optional)
-EVENMORE_10_STEP_LAUNCH_PLAN.md
+EVENMORE_10_STEP_LAUNCH_PLAN.mdchanges.diff
