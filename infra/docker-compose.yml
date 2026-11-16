@@ -4,12 +4,13 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: ai_gen_postgres
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ai_gen_post
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
@@ -22,6 +23,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ai_gen_redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
