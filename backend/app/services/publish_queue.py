@@ -99,9 +99,19 @@ class PublishingQueue:
     
     async def connect(self):
         """Connect to Redis."""
-        self._redis = redis.from_url(self.redis_url, decode_responses=True)
-        await self._redis.ping()
-        logger.info("Publishing queue connected to Redis")
+        try:
+            self._redis = redis.from_url(self.redis_url, decode_responses=True)
+            await self._redis.ping()
+            logger.info("Publishing queue connected to Redis")
+        except Exception:
+            self._redis = None
+            logger.warning("Publishing queue could not connect to Redis at %s", self.redis_url)
+            raise
+
+    async def _ensure_connected(self) -> None:
+        """Ensure Redis is connected, otherwise raise a clear error."""
+        if self._redis is None:
+            raise RuntimeError("Publishing queue is not available (Redis is not connected)")
     
     async def disconnect(self):
         """Disconnect from Redis."""
@@ -161,6 +171,8 @@ class PublishingQueue:
         image_url: str,
     ) -> bool:
         """Add a publish job to the queue."""
+        await self._ensure_connected()
+        
         # Check idempotency
         existing_id = await self.check_idempotency(attempt.idempotency_key)
         if existing_id:
@@ -197,6 +209,7 @@ class PublishingQueue:
     
     async def dequeue(self) -> Optional[PublishJob]:
         """Get next job from queue, checking scheduled queue first."""
+        await self._ensure_connected()
         # First, move any due scheduled jobs to main queue
         await self._move_due_scheduled()
         
@@ -254,6 +267,7 @@ class PublishingQueue:
     
     async def get_queue_stats(self) -> Dict[str, int]:
         """Get queue statistics."""
+        await self._ensure_connected()
         pipe = self._redis.pipeline()
         pipe.llen(self.QUEUE_NAME)
         pipe.zcard(self.SCHEDULED_QUEUE)
@@ -270,6 +284,7 @@ class PublishingQueue:
     
     async def process_job(self, job: PublishJob) -> None:
         """Process a single publish job."""
+        await self._ensure_connected()
         attempt_id = job.attempt_id
         
         # Mark as processing
