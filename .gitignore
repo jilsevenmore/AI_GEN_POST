@@ -100,3 +100,11 @@ tmp/
 
 PHASE*
 AI*
+
+# Local/dev helpers (not for repo)
+backend/recreate_db.py
+backend/run_server.bat
+backend/app/api/v1/endpoints/test_models.py
+
+# Local planning/docs (optional)
+EVENMORE_10_STEP_LAUNCH_PLAN.md
