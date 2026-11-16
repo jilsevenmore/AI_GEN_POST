@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, HttpUrl
 from typing import Optional, List, Literal, Dict, Any
 from datetime import datetime
 from uuid import UUID, uuid4
+from enum import Enum
 
 
 # ==========================================
@@ -18,31 +19,52 @@ class IDMixin(BaseModel):
 
 
 # ==========================================
-# Enums
+# Enums (using Enum instead of Literal subclasses for Python 3.12+ compatibility)
 # ==========================================
 
-class JobType(str, Literal["blog", "post"]):
-    pass
+class JobType(str, Enum):
+    blog = "blog"
+    post = "post"
 
 
-class JobStatus(str, Literal["pending", "expanding_prompt", "writing_text", "generating_image", "safety_check", "adapting", "awaiting_review", "approved", "regenerating", "publishing", "published", "failed"]):
-    pass
+class JobStatus(str, Enum):
+    pending = "pending"
+    expanding_prompt = "expanding_prompt"
+    writing_text = "writing_text"
+    generating_image = "generating_image"
+    safety_check = "safety_check"
+    adapting = "adapting"
+    awaiting_review = "awaiting_review"
+    approved = "approved"
+    regenerating = "regenerating"
+    publishing = "publishing"
+    published = "published"
+    failed = "failed"
 
 
-class Platform(str, Literal["instagram", "facebook", "linkedin"]):
-    pass
+class Platform(str, Enum):
+    instagram = "instagram"
+    facebook = "facebook"
+    linkedin = "linkedin"
 
 
-class ContentType(str, Literal["blog", "social_post"]):
-    pass
+class ContentType(str, Enum):
+    blog = "blog"
+    social_post = "social_post"
 
 
-class ImageAspectRatio(str, Literal["1:1", "4:5", "1.91:1", "9:16"]):
-    pass
+class ImageAspectRatio(str, Enum):
+    _1_1 = "1:1"
+    _4_5 = "4:5"
+    _1_91_1 = "1.91:1"
+    _9_16 = "9:16"
 
 
-class PublishStatus(str, Literal["pending", "sent", "failed", "retrying"]):
-    pass
+class PublishStatus(str, Enum):
+    pending = "pending"
+    sent = "sent"
+    failed = "failed"
+    retrying = "retrying"
 
 
 # ==========================================
@@ -132,6 +154,22 @@ class JobCreate(BaseModel):
     platforms: List[Platform] = Field(default_factory=list)
     use_references: bool = True
     reference_image_ids: List[UUID] = Field(default_factory=list)
+    source_context: Optional[str] = Field(
+        None, max_length=50000,
+        description="Extracted text from an attached source document (.md/.txt) used as generation context."
+    )
+    source_file_name: Optional[str] = Field(None, description="Original name of the attached source file.")
+    source_file_url: Optional[str] = Field(None, description="Storage URL of the attached source file.")
+    instagram_post_type: Optional[str] = Field(
+        None, description="Instagram post type: feed, story, or reel."
+    )
+    instagram_cover_image_url: Optional[str] = Field(
+        None, description="Cover image URL for Instagram stories/reels."
+    )
+    aspect_ratios: Optional[List[ImageAspectRatio]] = Field(
+        default_factory=list,
+        description="Desired image aspect ratios (e.g. ['1:1', '4:5']). Empty = auto-select based on platforms.",
+    )
 
 
 class JobResponse(IDMixin, TimestampMixin):
@@ -148,7 +186,13 @@ class JobResponse(IDMixin, TimestampMixin):
     current_step: Optional[str] = None
     error: Optional[str] = None
     company_id: UUID
-    user_id: UUID
+    user_id: Optional[UUID] = None
+    source_file_name: Optional[str] = None
+    source_file_url: Optional[str] = None
+    source_context_text: Optional[str] = None
+    instagram_post_type: Optional[str] = None
+    instagram_cover_image_url: Optional[str] = None
+    aspect_ratios: Optional[List[ImageAspectRatio]] = None
 
     class Config:
         from_attributes = True
@@ -174,7 +218,7 @@ class PlatformContent(BaseModel):
 
 class ImageVariant(BaseModel):
     id: UUID
-    url: HttpUrl
+    url: str
     aspect_ratio: ImageAspectRatio
     width: int
     height: int
@@ -193,6 +237,19 @@ class ContentResponse(IDMixin, TimestampMixin):
     primary_image_id: Optional[UUID] = None
     safety_check_passed: bool
     safety_flags: List[str] = Field(default_factory=list)
+
+    class Config:
+        from_attributes = True
+
+
+class SourceFileUploadResponse(BaseModel):
+    """Response returned after uploading a source document for a job."""
+    file_id: UUID
+    file_name: str
+    file_url: str
+    size_bytes: int
+    extracted_text_preview: Optional[str] = None  # first ~500 chars for UI preview
+    context_stored: bool  # whether the full text was saved to the job
 
     class Config:
         from_attributes = True

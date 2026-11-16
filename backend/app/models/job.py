@@ -34,6 +34,12 @@ class Job(Base):
     current_step: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     regeneration_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source_file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_file_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    source_context_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    instagram_post_type: Mapped[str | None] = mapped_column(String(20), nullable=True)  # feed, story, reel
+    instagram_cover_image_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    aspect_ratios: Mapped[List[str]] = mapped_column(ARRAY(String), default=list, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )

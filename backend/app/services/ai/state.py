@@ -1,7 +1,7 @@
 """LangGraph state definitions for the AI generation flow."""
 from typing import List, Optional, Dict, Any, Literal
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 
 
@@ -20,6 +20,7 @@ class BrandKitData(BaseModel):
 class JobInput(BaseModel):
     """Input parameters from the user."""
     job_id: UUID
+    company_id: UUID
     type: Literal["blog", "post"]
     title: str
     topic: str
@@ -30,6 +31,19 @@ class JobInput(BaseModel):
     platforms: List[str] = Field(default_factory=list)
     use_references: bool = True
     reference_image_ids: List[UUID] = Field(default_factory=list)
+    source_context: Optional[str] = Field(
+        None, description="Extracted text from an attached source document used as generation context."
+    )
+    instagram_post_type: Optional[str] = Field(
+        None, description="Instagram post type: feed, story, or reel."
+    )
+    instagram_cover_image_url: Optional[str] = Field(
+        None, description="Cover image URL for Instagram stories/reels."
+    )
+    aspect_ratios: Optional[List[str]] = Field(
+        default_factory=list,
+        description="User-requested image aspect ratios. Empty = auto-select based on platforms.",
+    )
 
 
 class TextBrief(BaseModel):
@@ -79,6 +93,9 @@ class ImageVariant(BaseModel):
 
 
 class GenerationState(BaseModel):
+    """Complete state for the LangGraph flow."""
+    model_config = ConfigDict(protected_namespaces=())
+    
     """Complete state for the LangGraph flow."""
     # Input
     job_input: JobInput

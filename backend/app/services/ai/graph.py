@@ -3,7 +3,7 @@ import logging
 from typing import Dict, Any, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+# from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # Disabled due to psycopg issues
 from app.services.ai.state import GenerationState, StateDict, create_initial_state
 from app.services.ai.nodes.expand_prompt import expand_prompt_node
 from app.services.ai.nodes.find_references import find_references_node
@@ -89,60 +89,171 @@ def get_generation_graph() -> StateGraph:
     if _generation_graph is None:
         graph = create_generation_graph()
         
-        # Use Postgres checkpointer for persistence
-        try:
-            checkpointer = AsyncPostgresSaver.from_conn_string(str(engine.url))
-            _generation_graph = graph.compile(checkpointer=checkpointer)
-        except Exception as e:
-            logger.warning(f"Could not create Postgres checkpointer, using memory: {e}")
-            _generation_graph = graph.compile(checkpointer=MemorySaver())
+        # Use MemorySaver for checkpointing (Postgres checkpointer disabled due to psycopg issues)
+        _generation_graph = graph.compile(checkpointer=MemorySaver())
     
     return _generation_graph
 
 
 async def run_generation_job(
-    job_input,
-    brand_kit,
-    db,
+    job_id_str: str,
+    company_id_str: str,
+    db_session_factory,
 ) -> GenerationState:
     """
     Run the complete generation job as a background task.
     
     This is called from the jobs endpoint via BackgroundTasks.
+    Accepts job_id and company_id as strings (avoids Pydantic serialization issues),
+    then re-queries the database for full job and brand kit data.
     """
-    graph = get_generation_graph()
+    from app.db.session import AsyncSessionLocal
+    from app.models.job import Job
+    from app.models.brand_kit import BrandKit
+    from sqlalchemy import select
+    from uuid import UUID
+    from app.services.ai.state import JobInput, BrandKitData
     
-    # Create initial state
-    initial_state = create_initial_state(job_input, brand_kit)
-    state_dict = initial_state.model_dump()
+    job_id = UUID(job_id_str)
+    company_id = UUID(company_id_str)
     
-    # Configure for this run
-    config = {
-        "configurable": {
-            "thread_id": str(job_input.job_id),
-        }
-    }
+    logger.info(f"🚀 Starting generation job {job_id} (company={company_id})")
     
-    try:
-        # Run the graph
-        final_state_dict = await graph.ainvoke(state_dict, config=config)
-        final_state = GenerationState.model_validate(final_state_dict)
+    # Create a fresh DB session (the request session is closed by now)
+    async with AsyncSessionLocal() as db:
+        # Query the job from database
+        result = await db.execute(select(Job).where(Job.id == job_id))
+        db_job = result.scalar_one_or_none()
+        if not db_job:
+            logger.error(f"❌ Job {job_id} not found in database")
+            raise RuntimeError(f"Job {job_id} not found")
         
-        # Save results to database
-        await _save_results(final_state, db)
+        # Query brand kit from database
+        brand_result = await db.execute(
+            select(BrandKit).where(BrandKit.company_id == company_id)
+        )
+        brand_kit_model = brand_result.scalar_one_or_none()
+        if not brand_kit_model:
+            # Create default brand kit
+            brand_kit_model = BrandKit(company_id=company_id, company_name="Demo Company")
+            db.add(brand_kit_model)
+            await db.commit()
+            await db.refresh(brand_kit_model)
         
-        return final_state
+        # Build JobInput from database record
+        job_input = JobInput(
+            job_id=db_job.id,
+            company_id=company_id,
+            type=db_job.type,
+            title=db_job.title,
+            topic=db_job.topic,
+            tone=db_job.tone,
+            audience=db_job.audience,
+            keywords=db_job.keywords or [],
+            image_description=db_job.image_description,
+            platforms=db_job.platforms or [],
+            use_references=db_job.use_references,
+            reference_image_ids=db_job.reference_image_ids or [],
+            source_context=db_job.source_context_text,
+            instagram_post_type=db_job.instagram_post_type,
+            instagram_cover_image_url=db_job.instagram_cover_image_url,
+            aspect_ratios=db_job.aspect_ratios or [],
+        )
         
-    except Exception as e:
-        logger.error(f"Generation job failed: {e}")
-        initial_state.error = str(e)
-        initial_state.current_step = "failed"
-        initial_state.progress = 0
-        await _save_error(initial_state, db)
-        return initial_state
+        brand_kit_data = BrandKitData(
+            company_name=brand_kit_model.company_name or "Demo Company",
+            tagline=brand_kit_model.tagline,
+            address=brand_kit_model.address,
+            logo_url=str(brand_kit_model.logo_url) if brand_kit_model.logo_url else None,
+            primary_color=brand_kit_model.primary_color,
+            secondary_color=brand_kit_model.secondary_color,
+            tone=brand_kit_model.tone,
+            use_openai_only=brand_kit_model.use_openai_only,
+        )
+        
+        logger.info(f"📋 Loaded job {job_id}: type={db_job.type}, topic={db_job.topic}")
+        logger.info(f"🎨 Loaded brand kit: {brand_kit_data.company_name}")
+        
+        # Create initial state using Pydantic models
+        initial_state = create_initial_state(job_input, brand_kit_data)
+        
+        # Call AI nodes directly (bypasses LangGraph Pydantic serialization issues)
+        from app.services.ai.nodes.expand_prompt import expand_prompt_node
+        from app.services.ai.nodes.find_references import find_references_node
+        from app.services.ai.nodes.generate_text import generate_text_node
+        from app.services.ai.nodes.generate_image import generate_image_node
+        from app.services.ai.nodes.safety_check import safety_check_node
+        from app.services.ai.nodes.adapt_platforms import adapt_platforms_node
+        
+        state = initial_state
+
+        async def _update_progress(step: str, progress: int, status: str = "pending"):
+            from datetime import datetime, timezone
+            try:
+                await db.execute(
+                    update(Job)
+                    .where(Job.id == job_id)
+                    .values(
+                        status=status,
+                        progress=progress,
+                        current_step=step,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
+                await db.commit()
+            except Exception as e:
+                logger.warning(f"Failed to update job progress for {job_id}: {e}")
+                await db.rollback()
+        
+        try:
+            await _update_progress("Expanding prompt", 10, "expanding_prompt")
+            logger.info(f"🔄 Step 1: Expanding prompt for job {job_id}")
+            state = await expand_prompt_node(state)
+            
+            await _update_progress("Finding references", 25, "expanding_prompt")
+            logger.info(f"🔄 Step 2: Finding references for job {job_id}")
+            state = await find_references_node(state)
+            
+            await _update_progress("Writing text", 40, "writing_text")
+            logger.info(f"🔄 Step 3a: Generating text for job {job_id}")
+            state = await generate_text_node(state)
+            
+            await _update_progress("Generating image", 60, "generating_image")
+            logger.info(f"🔄 Step 3b: Generating image for job {job_id}")
+            state = await generate_image_node(state)
+            
+            await _update_progress("Running safety checks", 80, "safety_check")
+            logger.info(f"🔄 Step 4: Safety check for job {job_id}")
+            state = await safety_check_node(state)
+            
+            await _update_progress("Adapting for platforms", 90, "adapting")
+            logger.info(f"🔄 Step 5: Adapting platforms for job {job_id}")
+            state = await adapt_platforms_node(state)
+            
+            logger.info(f"✅ Generation job {job_id} completed successfully")
+            await _save_results(state, db, company_id)
+            return state
+            
+        except Exception as e:
+            logger.error(f"❌ Generation job {job_id} failed: {e}", exc_info=True)
+            from sqlalchemy import update
+            from datetime import datetime, timezone
+            await db.execute(
+                update(Job)
+                .where(Job.id == job_id)
+                .values(
+                    status="failed",
+                    progress=0,
+                    current_step="Failed",
+                    error=str(e),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+            return None
 
 
-async def _save_results(state: GenerationState, db) -> None:
+async def _save_results(state: GenerationState, db, company_id) -> None:
     """Save generation results to database."""
     from app.models.content import Content
     from app.models.job import Job
@@ -157,14 +268,14 @@ async def _save_results(state: GenerationState, db) -> None:
     content = Content(
         id=uuid4(),
         job_id=job_id,
-        company_id=state.job_input.company_id,
+        company_id=company_id,
         type="social_post" if state.job_input.type == "post" else "blog",
         title=state.job_input.title,
         long_text=state.long_text or "",
-        platform_contents=[pc.model_dump() for pc in state.platform_contents],
-        image_variants=[iv.model_dump() for iv in state.generated_image_variants],
-        primary_image_id=state.generated_image_variants[0].id if state.generated_image_variants else None,
-        safety_check_passed=state.safety_check_passed,
+        platform_contents=[pc.model_dump(mode='json') for pc in state.platform_contents],
+        image_variants=[iv.model_dump(mode='json') for iv in state.generated_image_variants],
+        primary_image_id=str(state.generated_image_variants[0].id) if state.generated_image_variants else None,
+        safety_check_passed=state.safety_passed,
         safety_flags=state.safety_flags,
     )
     db.add(content)
