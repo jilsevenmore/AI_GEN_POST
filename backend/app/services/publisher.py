@@ -1,10 +1,13 @@
 """Publisher interface and Buffer implementation."""
 import abc
+import base64
+import hashlib
 import logging
+import os
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from uuid import UUID
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from cryptography.fernet import Fernet
@@ -78,12 +81,29 @@ class Publisher(abc.ABC):
         pass
 
 
+# In-memory PKCE store: state -> code_verifier
+# In production, use Redis or another shared store for multi-worker deployments.
+_pkce_store: Dict[str, str] = {}
+
+
 class BufferPublisher(Publisher):
-    """Buffer API publisher implementation."""
+    """Buffer API publisher implementation (current GraphQL API)."""
     
-    BASE_URL = "https://api.bufferapp.com/1"
-    OAUTH_AUTH_URL = "https://publish.buffer.com/oauth2/authorize"
-    OAUTH_TOKEN_URL = "https://api.bufferapp.com/1/oauth2/token.json"
+    # New Buffer OAuth endpoints
+    BASE_URL = "https://api.buffer.com"
+    OAUTH_AUTH_URL = "https://auth.buffer.com/auth"
+    OAUTH_TOKEN_URL = "https://auth.buffer.com/token"
+    
+    # OAuth scopes for the current Buffer API
+    OAUTH_SCOPES = [
+        "posts:write",
+        "posts:read",
+        "ideas:read",
+        "ideas:write",
+        "account:read",
+        "account:write",
+        "offline_access",
+    ]
     
     # Platform-specific image aspect ratios
     PLATFORM_ASPECT_RATIOS = {
@@ -129,59 +149,148 @@ class BufferPublisher(Publisher):
             return data
         return self._fernet.decrypt(data.encode()).decode()
     
+    # ------------------------------------------------------------------
+    # PKCE helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _generate_code_verifier() -> str:
+        """Generate a random PKCE code verifier."""
+        return base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode("ascii")
+    
+    @staticmethod
+    def _generate_code_challenge(verifier: str) -> str:
+        """Generate SHA-256 code challenge from a verifier."""
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    
+    # ------------------------------------------------------------------
+    # OAuth
+    # ------------------------------------------------------------------
     async def get_authorization_url(self, state: str) -> str:
         """Generate Buffer OAuth authorization URL with PKCE."""
+        code_verifier = self._generate_code_verifier()
+        code_challenge = self._generate_code_challenge(code_verifier)
+        
+        # Store the verifier so exchange_code can use it later
+        _pkce_store[state] = code_verifier
+        
         params = {
             "client_id": self.client_id,
             "redirect_uri": self.redirect_uri,
             "response_type": "code",
-            "scope": "posts.write,profiles.read",
+            "scope": " ".join(self.OAUTH_SCOPES),
             "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "prompt": "consent",
         }
         
-        # Buffer doesn't support PKCE natively, but we include state for CSRF protection
         query = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{self.OAUTH_AUTH_URL}?{query}"
     
-    async def exchange_code(self, code: str, state: str) -> ChannelConnection:
-        """Exchange OAuth code for access/refresh tokens."""
+    async def exchange_code(self, code: str, state: str) -> List[ChannelConnection]:
+        """Exchange OAuth code for access/refresh tokens, creating channel connections for all channels."""
+        code_verifier = _pkce_store.pop(state, None)
+        if not code_verifier:
+            raise ValueError("No PKCE code verifier found for this state (may have expired)")
+        
         data = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
-            "redirect_uri": self.redirect_uri,
-            "code": code,
             "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": self.redirect_uri,
+            "code_verifier": code_verifier,
         }
         
-        response = await self.client.post(self.OAUTH_TOKEN_URL, data=data)
+        response = await self.client.post(
+            self.OAUTH_TOKEN_URL,
+            data=data,
+        )
         response.raise_for_status()
         token_data = response.json()
         
-        # Get user's profiles to determine platform
-        profiles = await self._get_profiles(token_data["access_token"])
+        access_token = token_data["access_token"]
+        refresh_token = token_data.get("refresh_token", "")
+        expires_in = token_data.get("expires_in", 3600)
         
-        # Create channel connections for each profile
-        # For now, we'll return the first one - in production you'd create multiple
-        primary_profile = profiles[0]
+        # Get user's channels across all organizations
+        channels = await self._get_channels(access_token)
+        if not channels:
+            raise ValueError("No channels found for this Buffer account")
         
-        return ChannelConnection(
-            platform=primary_profile["service"],
-            external_account_id=primary_profile["id"],
-            account_name=primary_profile.get("formatted_username", primary_profile["service_username"]),
-            access_token_encrypted=self._encrypt(token_data["access_token"]),
-            refresh_token_encrypted=self._encrypt(token_data.get("refresh_token", "")),
-            token_expires_at=datetime.now(timezone.utc) + timedelta(seconds=token_data.get("expires_in", 3600)),
-            is_active=True,
-        )
+        # Create channel connections for each channel
+        channel_connections: List[ChannelConnection] = []
+        for channel in channels:
+            channel_connections.append(
+                ChannelConnection(
+                    platform=channel["service"],
+                    external_account_id=channel["id"],
+                    account_name=channel.get("displayName", channel.get("name", channel["service"])),
+                    access_token_encrypted=self._encrypt(access_token),
+                    refresh_token_encrypted=self._encrypt(refresh_token) if refresh_token else "",
+                    token_expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_in),
+                    is_active=True,
+                )
+            )
+        
+        logger.info(f"Created {len(channel_connections)} channel connections from OAuth")
+        return channel_connections
     
-    async def _get_profiles(self, access_token: str) -> List[Dict]:
-        """Get connected profiles from Buffer."""
-        response = await self.client.get(
-            "/profiles.json",
-            params={"access_token": access_token},
-        )
-        response.raise_for_status()
-        return response.json()
+    async def _get_channels(self, access_token: str) -> List[Dict]:
+        """Get connected channels from Buffer using GraphQL across all organizations."""
+        # First get account info to find organization IDs
+        account_query = """
+        query Account {
+          account {
+            id
+            email
+            organizations {
+              id
+              name
+            }
+          }
+        }
+        """
+        
+        try:
+            account_data = await self._graphql(access_token, account_query)
+            account = account_data.get("account", {})
+            organizations = account.get("organizations", [])
+            
+            if not organizations:
+                logger.error("No organizations found for this Buffer account")
+                return []
+            
+            all_channels: List[Dict] = []
+            
+            for org in organizations:
+                org_id = org["id"]
+                
+                channels_query = """
+                query GetChannels {
+                  channels(input: {
+                    organizationId: %s
+                  }) {
+                    id
+                    name
+                    displayName
+                    service
+                    avatar
+                    isQueuePaused
+                  }
+                }
+                """ % json_escape(org_id)
+                
+                data = await self._graphql(access_token, channels_query)
+                channels = data.get("channels", [])
+                logger.info(f"Organization {org.get('name')} ({org_id}): {len(channels)} channels")
+                all_channels.extend(channels)
+            
+            return all_channels
+        except Exception as e:
+            logger.error(f"Failed to fetch channels: {e}")
+            return []
     
     async def refresh_token(self, channel: ChannelConnection) -> ChannelConnection:
         """Refresh OAuth access token."""
@@ -195,7 +304,10 @@ class BufferPublisher(Publisher):
             "refresh_token": self._decrypt(channel.refresh_token_encrypted),
         }
         
-        response = await self.client.post(self.OAUTH_TOKEN_URL, data=data)
+        response = await self.client.post(
+            self.OAUTH_TOKEN_URL,
+            data=data,
+        )
         response.raise_for_status()
         token_data = response.json()
         
@@ -219,6 +331,28 @@ class BufferPublisher(Publisher):
         """Get decrypted access token."""
         return self._decrypt(channel.access_token_encrypted)
     
+    # ------------------------------------------------------------------
+    # GraphQL helpers
+    # ------------------------------------------------------------------
+    async def _graphql(self, access_token: str, query: str) -> Dict:
+        """Make a GraphQL request to the Buffer API."""
+        response = await self.client.post(
+            "",
+            json={"query": query},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        if "errors" in data:
+            error_msgs = [e.get("message", str(e)) for e in data["errors"]]
+            raise RuntimeError(f"Buffer GraphQL error: {'; '.join(error_msgs)}")
+        
+        return data.get("data", {})
+    
+    # ------------------------------------------------------------------
+    # Publish
+    # ------------------------------------------------------------------
     def _select_best_image(self, content: Content, platform: str) -> str:
         """Select best image variant for platform."""
         if not content.image_variants:
@@ -262,6 +396,10 @@ class BufferPublisher(Publisher):
             return text
         return text[:limit - 3] + "..."
     
+    def _mode_for_schedule(self, schedule_at: Optional[datetime]) -> str:
+        """Determine the sharing mode based on scheduling."""
+        return "shareNow" if schedule_at is None else "addToQueue"
+    
     async def publish(
         self,
         channel: ChannelConnection,
@@ -270,85 +408,111 @@ class BufferPublisher(Publisher):
         text: str,
         schedule_at: Optional[datetime] = None,
     ) -> PublishResult:
-        """Publish content to Buffer."""
+        """Publish content to Buffer using the GraphQL API."""
         access_token = self._get_access_token(channel)
         
-        # Prepare payload
-        payload = {
-            "access_token": access_token,
-            "profile_ids[]": channel.external_account_id,
-            "text": text,
-            "media[photo]": image_url,
-        }
-        
-        if schedule_at:
-            # Buffer uses Unix timestamp
-            payload["scheduled_at"] = int(schedule_at.timestamp())
-        else:
-            payload["now"] = "true"
-        
-        try:
-            response = await self.client.post(
-                "/updates/create.json",
-                data=payload,
+        # Buffer requires publicly accessible image URLs (not data: URLs)
+        if image_url and image_url.startswith("data:"):
+            return PublishResult(
+                success=False,
+                error="Image must be a publicly accessible URL (data URLs/base64 images are not supported by Buffer). Upload the image to a public host and try again.",
+                error_code="MEDIA_NOT_PUBLIC",
             )
-            
-            if response.status_code == 401:
-                # Token expired, try refresh
+        
+        # Determine scheduling
+        if schedule_at:
+            mode = "customScheduled"
+            scheduling_type = "automatic"
+            due_at = schedule_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        else:
+            mode = "addToQueue"
+            scheduling_type = "automatic"
+            due_at = None
+        
+        # Build assets array for image post
+        assets_block = ""
+        if image_url and (image_url.startswith("http://") or image_url.startswith("https://")):
+            assets_block = "assets: [{ image: { url: %s } }]," % json_escape(image_url)
+        
+        # Instagram requires metadata with post type
+        metadata_block = ""
+        if channel.platform == "instagram":
+            # Default to feed post; could be extended to support story/reel
+            metadata_block = "metadata: { instagram: { type: post, shouldShareToFeed: true } },"
+        
+        due_at_block = ""
+        if due_at:
+            due_at_block = "dueAt: %s," % json_escape(due_at)
+        
+        mutation = """
+        mutation CreatePost {
+          createPost(input: {
+            text: %s,
+            channelId: %s,
+            schedulingType: %s,
+            mode: %s,
+            %s
+            %s
+            %s
+          }) {
+            ... on PostActionSuccess {
+              post {
+                id
+                text
+              }
+            }
+            ... on MutationError {
+              message
+            }
+          }
+        }
+        """ % (
+            json_escape(text),
+            json_escape(channel.external_account_id),
+            scheduling_type,
+            mode,
+            due_at_block,
+            assets_block,
+            metadata_block,
+        )
+        
+        async def _attempt(token: str):
+            data = await self._graphql(token, mutation)
+            result = data.get("createPost", {})
+            if "post" in result:
+                return PublishResult(success=True, external_post_id=result["post"]["id"])
+            return PublishResult(
+                success=False,
+                error=result.get("message", "No post ID returned"),
+                error_code="NO_POST_ID",
+            )
+
+        try:
+            return await _attempt(access_token)
+        except RuntimeError as e:
+            error_str = str(e)
+            if "401" in error_str or "unauthorized" in error_str.lower():
+                # Try one refresh if possible
+                try:
+                    if channel.refresh_token_encrypted:
+                        refreshed = await self.refresh_token(channel)
+                        # copy refreshed tokens onto channel object for this attempt
+                        channel.access_token_encrypted = refreshed.access_token_encrypted
+                        channel.refresh_token_encrypted = refreshed.refresh_token_encrypted
+                        channel.token_expires_at = refreshed.token_expires_at
+                        return await _attempt(self._get_access_token(channel))
+                except Exception as refresh_err:
+                    logger.warning(f"Token refresh failed during publish: {refresh_err}")
                 return PublishResult(
                     success=False,
-                    error="Token expired",
+                    error="Token expired or unauthorized. Please reconnect Buffer.",
                     error_code="TOKEN_EXPIRED",
                 )
-            
-            response.raise_for_status()
-            result = response.json()
-            
-            # Buffer returns updates array
-            updates = result.get("updates", [])
-            if updates:
-                external_id = updates[0].get("id")
-                return PublishResult(
-                    success=True,
-                    external_post_id=external_id,
-                )
-            
             return PublishResult(
                 success=False,
-                error="No update ID returned",
-                error_code="NO_UPDATE_ID",
+                error=f"Buffer API error: {error_str}",
+                error_code="API_ERROR",
             )
-            
-        except httpx.HTTPStatusError as e:
-            error_detail = ""
-            try:
-                error_detail = e.response.json().get("error", str(e))
-            except:
-                error_detail = str(e)
-            
-            # Categorize errors
-            if e.response.status_code == 429:
-                error_code = "RATE_LIMITED"
-            elif e.response.status_code == 400:
-                if "image" in error_detail.lower():
-                    error_code = "IMAGE_REJECTED"
-                elif "media" in error_detail.lower():
-                    error_code = "MEDIA_FETCH_FAILED"
-                else:
-                    error_code = "INVALID_REQUEST"
-            elif e.response.status_code == 401:
-                error_code = "TOKEN_EXPIRED"
-            elif e.response.status_code == 403:
-                error_code = "PERMISSION_DENIED"
-            else:
-                error_code = "API_ERROR"
-            
-            return PublishResult(
-                success=False,
-                error=f"Buffer API error: {error_detail}",
-                error_code=error_code,
-            )
-        
         except Exception as e:
             logger.error(f"Publish failed: {e}")
             return PublishResult(
@@ -356,6 +520,14 @@ class BufferPublisher(Publisher):
                 error=f"Publish failed: {str(e)}",
                 error_code="UNKNOWN_ERROR",
             )
+
+
+# ------------------------------------------------------------------
+# JSON string escaping helper for GraphQL
+# ------------------------------------------------------------------
+def json_escape(s: str) -> str:
+    """Escape a string for safe inclusion in a GraphQL query string literal."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
 # Factory for getting publisher

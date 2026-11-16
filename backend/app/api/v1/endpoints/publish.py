@@ -13,10 +13,78 @@ from app.core.dependencies import get_current_company
 from app.models.channel import ChannelConnection as ChannelConnectionModel
 from app.models.publish import PublishAttempt
 from app.models.content import Content
-from app.services.publisher import get_publisher
-from app.services.publish_queue import get_publishing_queue, PublishJob
+from app.services.publisher import get_publisher, BufferPublisher
+from app.services.publish_queue import get_publishing_queue, PublishJob, PublishingQueue
 
 router = APIRouter()
+
+
+async def _enqueue_publish_attempts(
+    db: AsyncSession,
+    content: Content,
+    channels: List[ChannelConnectionModel],
+    schedule_at: Optional[datetime],
+    publisher: BufferPublisher,
+    queue: PublishingQueue,
+) -> List[PublishAttempt]:
+    """Create publish attempts and enqueue them for the given channels.
+
+    Mirrors the per-channel logic previously inlined in publish_content so it
+    can be reused by the approve flow (Approve & Publish).
+    """
+    attempts: List[PublishAttempt] = []
+    for channel in channels:
+        idempotency_key = f"publish_{content.id}_{channel.id}_{uuid4().hex[:8]}"
+
+        # Get platform-specific text and image
+        text = publisher._get_platform_text(content, channel.platform)
+        text = publisher._truncate_text(text, channel.platform)
+        image_url = publisher._select_best_image(content, channel.platform)
+
+        attempt = PublishAttempt(
+            content_id=content.id,
+            channel_id=channel.id,
+            platform=channel.platform,
+            status=PublishStatus.pending,
+            scheduled_at=schedule_at,
+            idempotency_key=idempotency_key,
+        )
+        db.add(attempt)
+        await db.flush()  # Get attempt ID
+
+        # Create job for queue
+        job = PublishJob(
+            attempt_id=attempt.id,
+            content_id=content.id,
+            channel_id=channel.id,
+            platform=channel.platform,
+            text=text,
+            image_url=image_url,
+            schedule_at=schedule_at,
+            idempotency_key=idempotency_key,
+        )
+
+        # Enqueue
+        try:
+            await queue.enqueue(attempt, channel, content, text, image_url)
+        except RuntimeError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Publishing queue is unavailable (Redis is not running)",
+            )
+
+        attempts.append(attempt)
+
+    await db.commit()
+
+    # Refresh to get IDs
+    for attempt in attempts:
+        await db.refresh(attempt)
+
+    # Ensure queue worker is running
+    queue.start_worker_task()
+
+    return attempts
 
 
 @router.get("/channels", response_model=List[ChannelConnection])
@@ -56,7 +124,7 @@ async def get_buffer_auth_url(
     )
 
 
-@router.post("/buffer/connect", response_model=ChannelConnection)
+@router.post("/buffer/connect", response_model=List[ChannelConnection])
 async def connect_buffer(
     request: BufferConnectRequest,
     current_company = Depends(get_current_company),
@@ -67,16 +135,42 @@ async def connect_buffer(
     
     try:
         # Exchange code for tokens
-        channel_connection = await publisher.exchange_code(request.code, request.state)
+        channel_connections = await publisher.exchange_code(request.code, request.state)
         
-        # Set company ID
-        channel_connection.company_id = current_company.id
+        saved_channels: List[ChannelConnectionModel] = []
+        for channel_connection in channel_connections:
+            # Set company ID
+            channel_connection.company_id = current_company.id
+            
+            # Check if a channel with same company + platform + external_account_id already exists
+            existing = await db.execute(
+                select(ChannelConnectionModel).where(
+                    ChannelConnectionModel.company_id == current_company.id,
+                    ChannelConnectionModel.platform == channel_connection.platform,
+                    ChannelConnectionModel.external_account_id == channel_connection.external_account_id,
+                )
+            )
+            existing_channel = existing.scalar_one_or_none()
+            
+            if existing_channel:
+                # Update existing channel with new tokens
+                existing_channel.access_token_encrypted = channel_connection.access_token_encrypted
+                existing_channel.refresh_token_encrypted = channel_connection.refresh_token_encrypted
+                existing_channel.token_expires_at = channel_connection.token_expires_at
+                existing_channel.account_name = channel_connection.account_name
+                existing_channel.is_active = True
+                existing_channel.updated_at = datetime.now(timezone.utc)
+                await db.commit()
+                await db.refresh(existing_channel)
+                saved_channels.append(existing_channel)
+            else:
+                # Insert new channel
+                db.add(channel_connection)
+                await db.commit()
+                await db.refresh(channel_connection)
+                saved_channels.append(channel_connection)
         
-        db.add(channel_connection)
-        await db.commit()
-        await db.refresh(channel_connection)
-        
-        return ChannelConnection.model_validate(channel_connection)
+        return [ChannelConnection.model_validate(c) for c in saved_channels]
         
     except Exception as e:
         logger.error(f"Buffer connect failed: {e}")
@@ -163,51 +257,9 @@ async def publish_content(
     queue = get_publishing_queue()
     
     # Create publish attempts and queue them
-    attempts = []
-    for channel in channels:
-        idempotency_key = f"publish_{request.content_id}_{channel.id}_{uuid4().hex[:8]}"
-        
-        # Get platform-specific text and image
-        text = publisher._get_platform_text(content, channel.platform)
-        text = publisher._truncate_text(text, channel.platform)
-        image_url = publisher._select_best_image(content, channel.platform)
-        
-        attempt = PublishAttempt(
-            content_id=request.content_id,
-            channel_id=channel.id,
-            platform=channel.platform,
-            status=PublishStatus.pending,
-            scheduled_at=request.schedule_at,
-            idempotency_key=idempotency_key,
-        )
-        db.add(attempt)
-        await db.flush()  # Get attempt ID
-        
-        # Create job for queue
-        job = PublishJob(
-            attempt_id=attempt.id,
-            content_id=request.content_id,
-            channel_id=channel.id,
-            platform=channel.platform,
-            text=text,
-            image_url=image_url,
-            schedule_at=request.schedule_at,
-            idempotency_key=idempotency_key,
-        )
-        
-        # Enqueue
-        await queue.enqueue(attempt, channel, content, text, image_url)
-        
-        attempts.append(attempt)
-    
-    await db.commit()
-    
-    # Refresh to get IDs
-    for attempt in attempts:
-        await db.refresh(attempt)
-    
-    # Ensure queue worker is running
-    queue.start_worker_task()
+    attempts = await _enqueue_publish_attempts(
+        db, content, channels, request.schedule_at, publisher, queue
+    )
     
     return [PublishAttemptResponse.model_validate(a) for a in attempts]
 
@@ -296,7 +348,13 @@ async def retry_publish(
             retry_count=attempt.retry_count,
         )
         
-        await queue.enqueue(attempt, channel, content, text, image_url)
+        try:
+            await queue.enqueue(attempt, channel, content, text, image_url)
+        except RuntimeError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Publishing queue is unavailable (Redis is not running)",
+            )
         queue.start_worker_task()
     
     return PublishAttemptResponse.model_validate(attempt)
@@ -308,7 +366,13 @@ async def get_queue_stats(
 ):
     """Get publishing queue statistics."""
     queue = get_publishing_queue()
-    stats = await queue.get_queue_stats()
+    try:
+        stats = await queue.get_queue_stats()
+    except RuntimeError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Publishing queue is unavailable (Redis is not running)",
+        )
     return stats
 
 
