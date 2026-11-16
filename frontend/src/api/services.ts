@@ -1,7 +1,7 @@
 import api from './client'
 import type {
   Token, UserRegister, UserLogin, UserResponse,
-  JobCreate, JobResponse, JobListResponse, JobStatus,
+  JobCreate, JobResponse, JobListResponse, JobStatus, SourceFileUploadResponse,
   ContentResponse, ReviewResponse, RegenerateRequest, ApproveRequest,
   ChannelConnection, PublishRequest, PublishAttemptResponse,
   BufferConnectResponse, BufferConnectRequest,
@@ -27,6 +27,13 @@ export const jobsApi = {
   get: (id: string) => api.get<JobResponse>(`/jobs/${id}`),
   cancel: (id: string) => api.delete(`/jobs/${id}`),
   simulateProgress: (id: string) => api.post<JobResponse>(`/jobs/${id}/simulate-progress`),
+  uploadSourceFile: (jobId: string, file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return api.post<SourceFileUploadResponse>(`/jobs/${jobId}/source-files`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
 }
 
 // Review

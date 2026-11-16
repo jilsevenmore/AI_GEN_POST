@@ -88,6 +88,12 @@ export interface JobCreate {
   platforms: Platform[]
   use_references: boolean
   reference_image_ids: UUID[]
+  source_context?: string
+  source_file_name?: string
+  source_file_url?: string
+  instagram_post_type?: string
+  instagram_cover_image_url?: string
+  aspect_ratios?: ImageAspectRatio[]
 }
 
 export interface JobResponse extends IDMixin, TimestampMixin {
@@ -105,6 +111,12 @@ export interface JobResponse extends IDMixin, TimestampMixin {
   error?: string
   company_id: UUID
   user_id: UUID
+  source_file_name?: string
+  source_file_url?: string
+  source_context_text?: string
+  instagram_post_type?: string
+  instagram_cover_image_url?: string
+  aspect_ratios?: ImageAspectRatio[]
 }
 
 export interface JobListResponse {
@@ -112,6 +124,15 @@ export interface JobListResponse {
   total: number
   page: number
   page_size: number
+}
+
+export interface SourceFileUploadResponse {
+  file_id: UUID
+  file_name: string
+  file_url: string
+  size_bytes: number
+  extracted_text_preview?: string
+  context_stored: boolean
 }
 
 // Content
