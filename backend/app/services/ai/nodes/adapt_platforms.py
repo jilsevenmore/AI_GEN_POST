@@ -48,6 +48,51 @@ Return ONLY valid JSON array:
     "hashtags": ["string"],
     "character_count": integer
   }
+]""".replace("{platform_specs}", "{platform_specs}")
+
+# Build the prompt by formatting only dynamic parts, keeping JSON literal
+def build_adaptation_prompt(core_content: str, long_text: str, company_name: str, tone: str, tagline: str, platform_specs: str) -> str:
+    return f"""You are a social media expert. Adapt the core content for each platform.
+
+Core Content:
+{core_content}
+
+Long-form Version (for LinkedIn/Blog):
+{long_text}
+
+Brand Context:
+- Company: {company_name}
+- Tone: {tone}
+- Tagline: {tagline}
+
+Platform Requirements:
+{platform_specs}
+
+For EACH platform, create:
+1. Platform-optimized text
+2. Relevant hashtags (5-15)
+3. Character count
+
+Return ONLY valid JSON array:
+[
+  {{
+    "platform": "linkedin",
+    "text": "string",
+    "hashtags": ["string"],
+    "character_count": integer
+  }},
+  {{
+    "platform": "facebook",
+    "text": "string",
+    "hashtags": ["string"],
+    "character_count": integer
+  }},
+  {{
+    "platform": "instagram",
+    "text": "string",
+    "hashtags": ["string"],
+    "character_count": integer
+  }}
 ]"""
 
 PLATFORM_SPECS = """
@@ -97,15 +142,18 @@ async def adapt_platforms_node(state: GenerationState) -> GenerationState:
     
     router = get_model_router()
     
+    platform_specs_text = "\n".join(requested_specs)
+    prompt_text = build_adaptation_prompt(
+        core_content=core_content[:2000],
+        long_text=long_text[:3000],
+        company_name=brand.company_name,
+        tone=brand.tone or "professional",
+        tagline=brand.tagline or "N/A",
+        platform_specs=platform_specs_text,
+    )
+    
     messages = [
-        SystemMessage(content=ADAPTATION_PROMPT.format(
-            core_content=core_content[:2000],
-            long_text=long_text[:3000],
-            company_name=brand.company_name,
-            tone=brand.tone or "professional",
-            tagline=brand.tagline or "N/A",
-            platform_specs="\n".join(requested_specs),
-        )),
+        SystemMessage(content=prompt_text),
         HumanMessage(content="Adapt for each platform."),
     ]
     
@@ -113,10 +161,29 @@ async def adapt_platforms_node(state: GenerationState) -> GenerationState:
         result = await router.ainvoke(messages, require_json=True)
         platforms_data = json.loads(result.generations[0].text)
         
+        # Handle cases where model returns {"platforms": [...]} or other wrappers
+        if isinstance(platforms_data, dict):
+            if "platforms" in platforms_data and isinstance(platforms_data["platforms"], list):
+                platforms_data = platforms_data["platforms"]
+            else:
+                # Try to find first list value
+                for v in platforms_data.values():
+                    if isinstance(v, list):
+                        platforms_data = v
+                        break
+        
+        if not isinstance(platforms_data, list):
+            raise ValueError(f"Expected list of platform adaptations, got {type(platforms_data)}")
+        
         platform_contents = []
         for pc_data in platforms_data:
+            if not isinstance(pc_data, dict):
+                continue
             if pc_data.get("platform") in job.platforms:
                 platform_contents.append(PlatformContent(**pc_data))
+        
+        if not platform_contents:
+            raise ValueError("No valid platform adaptations parsed")
         
         state.platform_contents = platform_contents
         
