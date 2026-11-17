@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [reactOx()],
   resolve: {
     alias: {
-      '@': import.meta.dirname + '/src',
+      '@': (import.meta as any).dirname + '/src',
     },
   },
   server: {

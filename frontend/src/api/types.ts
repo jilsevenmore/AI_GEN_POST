@@ -178,6 +178,8 @@ export interface ApproveRequest {
   selected_image_id: UUID
   edited_text?: Record<Platform, string>
   schedule_at?: string
+  channel_ids?: UUID[]
+  auto_publish?: boolean
 }
 
 export interface ReviewResponse {
@@ -388,4 +390,42 @@ export interface BetaDashboardResponse {
     title: string
     created_at: string
   }>
+}
+
+// ---------------------------------------------------------------------------
+// Leads (Steps 4, 6, 10)
+// ---------------------------------------------------------------------------
+
+export type LeadStatus = 'new' | 'contacted' | 'qualified' | 'proposal' | 'closed_won' | 'closed_lost'
+export type LeadSource = 'landing_page' | 'ad' | 'referral' | 'other'
+
+export interface LeadBase {
+  name: string
+  email: string
+  company?: string
+  phone?: string
+  interest?: string
+  source?: LeadSource
+  status?: LeadStatus
+  score?: number
+  assigned_owner?: string
+  next_follow_up?: string
+  notes?: string
+}
+
+export interface LeadCreate extends LeadBase {}
+
+export interface LeadUpdate extends Partial<LeadBase> {}
+
+export interface LeadResponse extends LeadBase, IDMixin, TimestampMixin {
+  company_id?: UUID
+}
+
+export interface LeadStatsResponse {
+  total_leads: number
+  by_status: Record<string, number>
+  by_source: Record<string, number>
+  conversion_rate: number
+  average_score: number
+  leads_this_month: number
 }

@@ -85,27 +85,32 @@ async def cleanup_old_publish_attempts(retention_days: int = 90) -> dict:
 async def generate_missing_search_vectors(batch_size: int = 100) -> dict:
     """Generate search vectors for images that don't have them."""
     logger.info("Starting search vector generation")
-    
+
     async with AsyncSessionLocal() as db:
-        # Find images without search vectors
         result = await db.execute(
             select(ImageModel).where(
                 ImageModel.search_vector.is_(None)
             ).limit(batch_size)
         )
         images = result.scalars().all()
-        
+        if not images:
+            return {"vectors_generated": 0, "pending": 0}
+
+        from app.services.embedding_service import embed_text
+
         count = 0
         for image in images:
-            # Generate search vector from prompt + tags
-            search_text = f"{image.prompt} {' '.join(image.tags)}"
-            image.search_vector = search_text  # In production, this would be an embedding
-            count += 1
-        
+            text_value = " ".join([image.prompt or "", " ".join(image.tags or [])]).strip()
+            try:
+                image.search_vector = await embed_text(text_value, is_query=False)
+                if image.search_vector is not None:
+                    count += 1
+            except Exception as e:
+                logger.warning("Failed to generate embedding for image %s: %s", image.id, e)
+
         await db.commit()
-        
-        logger.info(f"Generated search vectors for {count} images")
-        return {"vectors_generated": count}
+        logger.info("Generated search vectors for %d/%d images", count, len(images))
+        return {"vectors_generated": count, "pending": max(len(images) - count, 0)}
 
 
 async def reset_daily_quotas() -> dict:

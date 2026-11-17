@@ -1,8 +1,8 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, FileText, Shield, ExternalLink } from 'lucide-react'
-import { clsx } from 'clsx'
+import { ArrowLeft, FileText, Shield } from 'lucide-react'
 import { legalApi } from '../api/services'
+import { SEO } from '../components/SEO'
 
 export function LegalPage() {
   const { page } = useParams<{ page: 'privacy' | 'terms' }>()
@@ -79,6 +79,17 @@ export function LegalPage() {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
+      <SEO
+        title={title}
+        description={page === 'privacy' ? 'Read the EVENMORE INFOTECH privacy policy.' : 'Read the EVENMORE INFOTECH terms of service.'}
+        path={`/legal/${page}`}
+        jsonLd={{
+          '@context': 'https://schema.org',
+          '@type': 'WebPage',
+          name: title,
+          url: `https://evenmoreinfotech.com/legal/${page}`,
+        }}
+      />
       {/* Header */}
       <div className="flex items-center gap-4">
         <button onClick={() => navigate('/dashboard')} className="btn-ghost p-2" aria-label="Go back">
@@ -127,5 +138,3 @@ export function LegalPage() {
     </div>
   )
 }
-
-import { useState } from 'react'

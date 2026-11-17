@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import DateTime, String, ForeignKey, Boolean, Index, UniqueConstraint
+from sqlalchemy import DateTime, String, ForeignKey, Boolean, Index, UniqueConstraint, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.session import Base
@@ -46,5 +46,4 @@ Index("ix_channel_connections_company_id", ChannelConnection.company_id)
 UniqueConstraint(
     "company_id", "platform", "external_account_id",
     name="uq_channel_company_platform_account",
-    table="channel_connections"
 )

@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
@@ -12,7 +12,12 @@ import { SettingsPage } from './pages/SettingsPage'
 import { LegalPage } from './pages/LegalPage'
 import { OnboardingPage } from './pages/OnboardingPage'
 import { BetaDashboardPage } from './pages/BetaDashboardPage'
+import { LandingPage } from './pages/LandingPage'
+import { LeadDashboardPage } from './pages/LeadDashboardPage'
+import { BufferCallbackPage } from './pages/BufferCallbackPage'
+import { PixelTracker, trackPageView } from './components/PixelTracker'
 import { useAuth } from './hooks/useAuth'
+import { useEffect } from 'react'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth()
@@ -50,37 +55,60 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+// Track page views for advertising pixels (Step 5)
+function PageTracking() {
+  const location = useLocation()
+  useEffect(() => {
+    trackPageView(location.pathname, document.title)
+  }, [location.pathname])
+  return null
+}
+
 export default function App() {
   return (
-    <Routes>
-      <Route path="/login" element={
-        <PublicRoute>
-          <LoginPage />
-        </PublicRoute>
-      } />
-      <Route path="/register" element={
-        <PublicRoute>
-          <RegisterPage />
-        </PublicRoute>
-      } />
-      <Route path="/" element={
-        <ProtectedRoute>
-          <Layout />
-        </ProtectedRoute>
-      }>
-        <Route index element={<DashboardPage />} />
-        <Route path="dashboard" element={<DashboardPage />} />
-        <Route path="create/:type" element={<JobFormPage />} />
-        <Route path="review/:jobId" element={<ReviewPage />} />
-        <Route path="library" element={<LibraryPage />} />
-        <Route path="brand" element={<BrandKitPage />} />
-        <Route path="publish/:contentId" element={<PublishPage />} />
-        <Route path="settings" element={<SettingsPage />} />
-        <Route path="legal/:page" element={<LegalPage />} />
-        <Route path="beta/onboarding/:userId" element={<OnboardingPage />} />
-        <Route path="beta/dashboard" element={<BetaDashboardPage />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
-    </Routes>
+    <>
+      <PixelTracker />
+      <PageTracking />
+      <Routes>
+        {/* Public landing page (Step 2) — no auth required */}
+        <Route path="/" element={<LandingPage />} />
+
+        {/* Public auth routes */}
+        <Route path="/login" element={
+          <PublicRoute>
+            <LoginPage />
+          </PublicRoute>
+        } />
+        <Route path="/register" element={
+          <PublicRoute>
+            <RegisterPage />
+          </PublicRoute>
+        } />
+
+        {/* OAuth callbacks */}
+        <Route path="/auth/buffer/callback" element={<BufferCallbackPage />} />
+
+        {/* Protected app routes */}
+        <Route path="/" element={
+          <ProtectedRoute>
+            <Layout />
+          </ProtectedRoute>
+        }>
+          <Route index element={<DashboardPage />} />
+          <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="leads/dashboard" element={<LeadDashboardPage />} />
+          <Route path="create/:type" element={<JobFormPage />} />
+          <Route path="review/:jobId" element={<ReviewPage />} />
+          <Route path="library" element={<LibraryPage />} />
+          <Route path="brand" element={<BrandKitPage />} />
+          <Route path="publish/:contentId" element={<PublishPage />} />
+          <Route path="settings" element={<SettingsPage />} />
+          <Route path="legal/:page" element={<LegalPage />} />
+          <Route path="beta/onboarding/:userId" element={<OnboardingPage />} />
+          <Route path="beta/dashboard" element={<BetaDashboardPage />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </>
   )
 }

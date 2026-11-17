@@ -8,6 +8,7 @@ import type {
   LibraryImageResponse, LibrarySearchResponse, LibrarySearchRequest, SaveToLibraryRequest, ImageTag,
   BrandKitResponse, BrandKitCreate, BrandKitUpdate,
   QuotaResponse,
+  LeadCreate, LeadResponse, LeadUpdate, LeadStatsResponse,
 } from './types'
 
 // Auth
@@ -126,4 +127,22 @@ export const betaApi = {
   // Metrics
   getMetrics: (days?: number) => api.get('/beta/metrics', { params: { days } }),
   getDashboard: () => api.get('/beta/dashboard'),
+}
+
+// Leads
+export const leadApi = {
+  create: (data: LeadCreate) =>
+    api.post<LeadResponse>('/leads', data),
+  list: (params?: {
+    page?: number
+    page_size?: number
+    status?: string
+    source?: string
+    search?: string
+  }) => api.get<LeadResponse[]>('/leads', { params }),
+  get: (leadId: string) =>
+    api.get<LeadResponse>(`/leads/${leadId}`),
+  update: (leadId: string, data: LeadUpdate) =>
+    api.patch<LeadResponse>(`/leads/${leadId}`, data),
+  getStats: () => api.get<LeadStatsResponse>('/leads/stats'),
 }

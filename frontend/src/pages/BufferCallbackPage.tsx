@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Loader2, AlertCircle, CheckCircle, ArrowLeft } from 'lucide-react'
 import { publishApi } from '../api/services'
+import { SEO } from '../components/SEO'
 
 export function BufferCallbackPage() {
   const navigate = useNavigate()
@@ -45,6 +46,7 @@ export function BufferCallbackPage() {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <SEO title="Connecting Buffer" description="Completing Buffer authorization." path="/auth/buffer/callback" robots="noindex,nofollow" />
         <div className="text-center">
           <Loader2 className="h-10 w-10 animate-spin text-primary-600 mx-auto mb-4" />
           <h2 className="text-lg font-medium text-gray-900">Connecting to Buffer...</h2>
@@ -59,6 +61,7 @@ export function BufferCallbackPage() {
   if (error) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <SEO title="Buffer Connection Failed" description="Buffer authorization failed." path="/auth/buffer/callback" robots="noindex,nofollow" />
         <div className="text-center max-w-md px-4">
           <AlertCircle className="h-10 w-10 text-red-500 mx-auto mb-4" />
           <h2 className="text-lg font-medium text-gray-900">Connection Failed</h2>
@@ -77,6 +80,7 @@ export function BufferCallbackPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <SEO title="Buffer Connected" description="Buffer account connected successfully." path="/auth/buffer/callback" robots="noindex,nofollow" />
       <div className="text-center max-w-md px-4">
         <CheckCircle className="h-10 w-10 text-green-500 mx-auto mb-4" />
         <h2 className="text-lg font-medium text-gray-900">Buffer Connected!</h2>

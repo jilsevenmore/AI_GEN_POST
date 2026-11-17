@@ -270,6 +270,8 @@ class ApproveRequest(BaseModel):
     selected_image_id: UUID
     edited_text: Optional[Dict[Platform, str]] = None  # Platform -> edited text
     schedule_at: Optional[datetime] = None  # If None, publish now
+    channel_ids: Optional[List[UUID]] = None  # If provided, publish only to these channels
+    auto_publish: bool = True  # If True, enqueue publishing after approval
 
 
 class ReviewResponse(BaseModel):

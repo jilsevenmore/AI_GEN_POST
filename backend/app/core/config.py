@@ -44,15 +44,36 @@ class Settings(BaseSettings):
     OPENROUTER_DAILY_LIMIT: int = 50
     OPENROUTER_RATE_LIMIT_RPM: int = 20
 
-    # OpenAI (Fallback)
+    # OpenAI (Fallback / image generation)
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_FALLBACK_ENABLED: bool = True
+
+    # Hugging Face (Inference Providers / Hub)
+    HF_TOKEN: Optional[str] = None
+    HF_BASE_URL: str = "https://router.huggingface.co/v1"
+    HF_PROMPT_MODEL: str = "MiniMaxAI/MiniMax-M2.7"
+
+    # MiniMax (Prompt enhancement via Hugging Face by default; configurable)
+    MINIMAX_API_KEY: Optional[str] = None
+    MINIMAX_BASE_URL: str = "https://router.huggingface.co/v1"
+    MINIMAX_MODEL: str = "MiniMaxAI/MiniMax-M2.7"
+    MINIMAX_PROMPT_ENHANCE_ENABLED: bool = True
+
+    # Ollama (Local, free prompt enhancement)
+    OLLAMA_BASE_URL: str = "http://localhost:11434/v1"
+    OLLAMA_MODEL: Optional[str] = None  # e.g. qwen2.5:3b-instruct
+    OLLAMA_PROMPT_ENHANCE_ENABLED: bool = False
 
     # GPT Image 2.5 Sunburst
     SUNBURST_API_KEY: Optional[str] = None
     SUNBURST_BASE_URL: str = "https://api.openai.com/v1"
     SUNBURST_MODEL: str = "gpt-image-2.5-sunburst"
+
+    # Embeddings (semantic search, Hugging Face)
+    EMBEDDING_MODEL: str = "BAAI/bge-base-en-v1.5"
+    EMBEDDING_DIMENSIONS: int = 768
+    EMBEDDING_DEVICE: str = "cpu"
 
     # Cloudinary
     CLOUDINARY_CLOUD_NAME: Optional[str] = None
@@ -70,6 +91,14 @@ class Settings(BaseSettings):
     BUFFER_REDIRECT_URI: str = "http://localhost:5173/auth/buffer/callback"
     BUFFER_API_BASE: str = "https://api.bufferapp.com/1"
     BUFFER_RATE_LIMIT_RPM: int = 100  # per 15 min per app
+
+    # Django CRM Integration (Step 4)
+    DJANGO_CRM_API_URL: Optional[str] = None
+    DJANGO_CRM_AUTH_TOKEN: Optional[str] = None
+
+    # Advertising Pixels (Step 5)
+    META_PIXEL_ID: Optional[str] = None
+    GOOGLE_MEASUREMENT_ID: Optional[str] = None
 
     # LangSmith
     LANGSMITH_API_KEY: Optional[str] = None

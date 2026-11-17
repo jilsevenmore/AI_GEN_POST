@@ -11,6 +11,7 @@ import type { RegenerateRequest, ApproveRequest, Platform, PlatformContent } fro
 import clsx from 'clsx'
 import { format } from 'date-fns'
 import { FreeModelNotice } from '../components/FreeModelNotice'
+import { SEO } from '../components/SEO'
 
 const PLATFORM_COLORS: Record<Platform, string> = {
   instagram: 'bg-gradient-to-r from-purple-500 to-pink-500',
@@ -106,14 +107,26 @@ export function ReviewPage() {
 
     const scheduleISO = scheduleAt ? scheduleAt.toISOString() : undefined
 
-    approveMutation.mutate({
-      selected_image_id: selectedImageId,
-      edited_text: Object.keys(editedTexts).some((k) => editedTexts[k as Platform] !== 
-        content.platform_contents.find((pc) => pc.platform === k)?.text)
-        ? editedTexts as Record<Platform, string>
-        : undefined,
-      schedule_at: scheduleISO,
-    })
+    approveMutation.mutate(
+      {
+        selected_image_id: selectedImageId,
+        edited_text: Object.keys(editedTexts).some(
+          (k) => editedTexts[k as Platform] !== content.platform_contents.find((pc) => pc.platform === k)?.text
+        )
+          ? (editedTexts as Record<Platform, string>)
+          : undefined,
+        schedule_at: scheduleISO,
+        auto_publish: true,
+      },
+      {
+        onSuccess: (response) => {
+          navigate(`/publish/${response.data.id}`)
+        },
+        onError: (err: any) => {
+          alert(err?.response?.data?.detail || 'Failed to approve/publish content')
+        },
+      }
+    )
   }
 
   const handleRegenerate = () => {
@@ -136,6 +149,7 @@ export function ReviewPage() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
+      <SEO title="Review Content" description="Review and approve generated content." path={jobId ? `/review/${jobId}` : '/review'} robots="noindex,nofollow" />
       {/* Free Model Notice */}
       <FreeModelNotice 
         isVisible={showFreeModelNotice} 

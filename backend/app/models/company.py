@@ -31,6 +31,7 @@ class Company(Base):
     images: Mapped[list["Image"]] = relationship(back_populates="company", cascade="all, delete-orphan")
     channel_connections: Mapped[list["ChannelConnection"]] = relationship(back_populates="company", cascade="all, delete-orphan")
     quotas: Mapped[list["Quota"]] = relationship(back_populates="company", cascade="all, delete-orphan")
+    beta_users: Mapped[list["BetaUser"]] = relationship(back_populates="company", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Company(id={self.id}, name={self.name})>"

@@ -6,6 +6,7 @@ import type { JobResponse, JobStatus } from '../api/types'
 import { formatDistanceToNow } from 'date-fns'
 import clsx from 'clsx'
 import { FreeModelNotice } from '../components/FreeModelNotice'
+import { SEO } from '../components/SEO'
 
 const statusConfig: Record<JobStatus, { label: string; icon: React.ComponentType<{ className?: string }>; color: string }> = {
   pending: { label: 'Queued', icon: Clock, color: 'gray' },

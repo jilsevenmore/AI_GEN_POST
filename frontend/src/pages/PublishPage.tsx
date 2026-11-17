@@ -9,6 +9,7 @@ import { publishApi } from '../api/services'
 import type { ChannelConnection, PublishAttemptResponse, PublishStatus, Platform } from '../api/types'
 import clsx from 'clsx'
 import { format, formatDistanceToNow } from 'date-fns'
+import { SEO } from '../components/SEO'
 
 const statusConfig: Record<PublishStatus, { label: string; color: string; icon: React.ComponentType<{ className?: string }> }> = {
   pending: { label: 'Pending', color: 'yellow', icon: Clock },
@@ -174,6 +175,7 @@ export function PublishPage() {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
+      <SEO title="Publish Content" description="Publish approved content to connected channels." path={contentId ? `/publish/${contentId}` : '/publish'} robots="noindex,nofollow" />
       {/* Header */}
       <div className="flex items-center gap-4">
         <button

@@ -5,6 +5,7 @@ from sqlalchemy.orm import selectinload
 from typing import List, Optional
 from uuid import UUID, uuid4
 from datetime import datetime, timezone
+from pathlib import Path
 from app.db.session import get_db
 from app.schemas.common import (
     JobCreate, JobResponse, JobListResponse, JobStatus, JobType, Platform,
@@ -187,12 +188,27 @@ async def upload_source_file(
             detail="File is not valid UTF-8 text. Please upload a .md or .txt file."
         )
 
-    # --- Storage: upload to Cloudinary (raw), mirroring the brand logo pattern ---
-    # TODO: Wire real Cloudinary upload when CLOUDINARY credentials are configured.
-    # For now, store a placeholder URL and the extracted text on the job.
+    # Cap stored context to prevent oversized DB/LLM payloads (generation uses truncated excerpts)
+    MAX_SOURCE_CONTEXT_CHARS = 200000
+    if len(source_text) > MAX_SOURCE_CONTEXT_CHARS:
+        source_text = source_text[:MAX_SOURCE_CONTEXT_CHARS] + "\n\n[Source document truncated for storage/processing]"
+
+    # --- Storage: upload to Cloudinary (raw) when configured; fallback to placeholder URL ---
     import uuid as _uuid
-    object_name = f"source_files/{current_company.id}/{job_id}/{_uuid.uuid4().hex}_{filename}"
+    object_name = f"{current_company.id}/{job_id}/{_uuid.uuid4().hex}_{Path(filename).stem}"
     file_url = f"https://res.cloudinary.com/demo/raw/upload/v1/source_files/{object_name}"
+    try:
+        from app.services.cloudinary_service import upload_text_to_cloudinary
+        file_url = await upload_text_to_cloudinary(
+            source_text,
+            filename=filename,
+            folder="source_files",
+            public_id=object_name,
+            tags=[str(current_company.id), str(job_id), "source_file"],
+        )
+    except Exception:
+        # Cloudinary not configured or upload failed; keep placeholder URL and stored text
+        pass
 
     # --- Persist to job ---
     job.source_file_name = filename

@@ -14,6 +14,7 @@ from app.models.content import Content
 from app.models.company import Company
 from app.services.ai.state import ReferenceImage, ImageBrief
 from app.core.config import get_settings
+from app.services.embedding_service import embed_text
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -68,23 +69,25 @@ class ImageLibraryService:
             approved_at=datetime.now(timezone.utc),
         )
         
-        # Generate search vector (will be updated by trigger or manually)
-        library_image.search_vector = self._generate_search_text(
-            image_variant.get("prompt_used", ""), 
-            tags
-        )
-        
+        # Generate and store search embedding (best-effort)
+        search_text = self._generate_search_text(library_image.prompt, tags)
+        try:
+            library_image.search_vector = await embed_text(search_text, is_query=False)
+        except Exception as e:
+            logger.warning("Failed to generate embedding for image %s: %s", image_id, e)
+            library_image.search_vector = None
+
         self.db.add(library_image)
         await self.db.commit()
         await self.db.refresh(library_image)
-        
+
         return library_image
     
     def _generate_search_text(self, prompt: str, tags: List[str]) -> str:
-        """Generate combined text for vector embedding."""
-        parts = [prompt]
-        parts.extend(tags)
-        return " ".join(parts)
+        """Generate combined text for vector embedding input."""
+        parts = [prompt or ""]
+        parts.extend(tags or [])
+        return " ".join(p for p in parts if p).strip()
     
     async def search_library(
         self,
@@ -108,9 +111,40 @@ class ImageLibraryService:
         )
         
         # Apply filters
+        order_by_similarity = None
+        if tags:
+            for tag in tags:
+                base_query = base_query.where(ImageModel.tags.op('@>')([tag]))
+
+        if aspect_ratio:
+            base_query = base_query.where(ImageModel.aspect_ratio == aspect_ratio)
+
+        if is_global is not None:
+            base_query = base_query.where(ImageModel.is_global == is_global)
+
         if query and use_vector_search:
-            # Use pgvector similarity search
-            base_query = await self._add_vector_search(base_query, query, company_id)
+            try:
+                query_embedding = await embed_text(query, is_query=True)
+                if query_embedding:
+                    base_query = base_query.where(ImageModel.search_vector.is_not(None))
+                    order_by_similarity = ImageModel.search_vector.cosine_distance(query_embedding)
+                else:
+                    search_term = f"%{query.lower()}%"
+                    base_query = base_query.where(
+                        or_(
+                            ImageModel.prompt.ilike(search_term),
+                            ImageModel.tags.op('&&')(func.array([query.lower()]))
+                        )
+                    )
+            except Exception as e:
+                logger.warning("Vector search failed, falling back to text search: %s", e)
+                search_term = f"%{query.lower()}%"
+                base_query = base_query.where(
+                    or_(
+                        ImageModel.prompt.ilike(search_term),
+                        ImageModel.tags.op('&&')(func.array([query.lower()]))
+                    )
+                )
         elif query:
             # Fallback to text search
             search_term = f"%{query.lower()}%"
@@ -120,27 +154,20 @@ class ImageLibraryService:
                     ImageModel.tags.op('&&')(func.array([query.lower()]))
                 )
             )
-        
-        if tags:
-            for tag in tags:
-                base_query = base_query.where(ImageModel.tags.op('@>')([tag]))
-        
-        if aspect_ratio:
-            base_query = base_query.where(ImageModel.aspect_ratio == aspect_ratio)
-        
-        if is_global is not None:
-            base_query = base_query.where(ImageModel.is_global == is_global)
-        
+
         # Get total count
         count_query = select(func.count()).select_from(base_query.subquery())
         total_result = await self.db.execute(count_query)
-        total = total_result.scalar()
-        
+        total = total_result.scalar() or 0
+
         # Get paginated results
-        query_obj = base_query.order_by(ImageModel.approved_at.desc()).offset((page - 1) * page_size).limit(page_size)
+        if order_by_similarity is not None:
+            query_obj = base_query.order_by(order_by_similarity, ImageModel.approved_at.desc()).offset((page - 1) * page_size).limit(page_size)
+        else:
+            query_obj = base_query.order_by(ImageModel.approved_at.desc()).offset((page - 1) * page_size).limit(page_size)
         result = await self.db.execute(query_obj)
         images = result.scalars().all()
-        
+
         return list(images), total
     
     async def _add_vector_search(
@@ -254,11 +281,16 @@ class ImageLibraryService:
         
         image.tags = tags
         image.updated_at = datetime.now(timezone.utc)
-        image.search_vector = self._generate_search_text(image.prompt, tags)
-        
+        search_text = self._generate_search_text(image.prompt, tags)
+        try:
+            image.search_vector = await embed_text(search_text, is_query=False)
+        except Exception as e:
+            logger.warning("Failed to regenerate embedding for image %s: %s", image_id, e)
+            image.search_vector = None
+
         await self.db.commit()
         await self.db.refresh(image)
-        
+
         return image
     
     async def delete_image(self, image_id: UUID, company_id: UUID) -> bool:
@@ -331,9 +363,9 @@ class ImageLibraryService:
 # Vector search helpers
 async def create_vector_index(db: AsyncSession) -> None:
     """Create HNSW index on search_vector column."""
-    # This would be run as a migration
+    # Managed by Alembic migrations; keep helper for compatibility.
     await db.execute(text("""
-        CREATE INDEX IF NOT EXISTS idx_images_search_vector_hnsw 
+        CREATE INDEX IF NOT EXISTS idx_images_search_vector_hnsw
         ON images USING hnsw (search_vector vector_cosine_ops)
         WITH (m = 16, ef_construction = 64);
     """))
@@ -342,7 +374,21 @@ async def create_vector_index(db: AsyncSession) -> None:
 
 async def generate_embeddings_for_existing(db: AsyncSession, batch_size: int = 100) -> int:
     """Generate vector embeddings for existing images without vectors."""
-    # In production, this would call an embedding model (e.g., OpenAI text-embedding-3-small)
-    # For now, placeholder
-    logger.info("Embedding generation not yet implemented - requires embedding model")
-    return 0
+    result = await db.execute(
+        select(ImageModel).where(ImageModel.search_vector.is_(None)).limit(batch_size)
+    )
+    images = result.scalars().all()
+    if not images:
+        return 0
+
+    count = 0
+    for image in images:
+        text_value = " ".join([image.prompt or "", " ".join(image.tags or [])]).strip()
+        try:
+            image.search_vector = await embed_text(text_value, is_query=False)
+            if image.search_vector is not None:
+                count += 1
+        except Exception as e:
+            logger.warning("Failed to backfill embedding for image %s: %s", image.id, e)
+    await db.commit()
+    return count

@@ -31,6 +31,14 @@ export default {
           800: '#5b21b6',
           900: '#4c1d95',
         },
+        // EVENMORE brand accent
+        evenmore: {
+          50: '#f0f9ff',
+          100: '#e0f2fe',
+          500: '#0ea5e9',
+          600: '#0284c7',
+          900: '#0c4a6e',
+        },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],

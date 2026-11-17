@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { Mail, Lock, Eye, EyeOff, AlertCircle } from 'lucide-react'
 import { authApi } from '../api/services'
 import { useAuth } from '../hooks/useAuth'
+import { SEO } from '../components/SEO'
 
 const loginSchema = z.object({
   email: z.string().email('Invalid email address'),
@@ -49,6 +50,7 @@ export function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+      <SEO title="Sign In" description="Sign in to your EVENMORE INFOTECH account." path="/login" />
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-gray-900">AI Gen Post</h1>

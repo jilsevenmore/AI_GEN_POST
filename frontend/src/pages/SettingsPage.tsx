@@ -10,6 +10,7 @@ import { publishApi, authApi } from '../api/services'
 import type { ChannelConnection } from '../api/types'
 import clsx from 'clsx'
 import { formatDistanceToNow, format } from 'date-fns'
+import { SEO } from '../components/SEO'
 
 const platformColors: Record<string, string> = {
   instagram: 'bg-gradient-to-r from-purple-500 to-pink-500',
@@ -71,6 +72,7 @@ export function SettingsPage() {
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
+      <SEO title="Settings" description="Manage account, channels, and integrations." path="/settings" robots="noindex,nofollow" />
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
