@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Loader2, AlertCircle, CheckCircle, ArrowLeft } from 'lucide-react'
 import { publishApi } from '../api/services'
@@ -9,6 +9,7 @@ export function BufferCallbackPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
+  const attemptedKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -27,6 +28,12 @@ export function BufferCallbackPage() {
       setLoading(false)
       return
     }
+
+    const attemptKey = `${code}:${state}`
+    if (attemptedKeyRef.current === attemptKey) {
+      return
+    }
+    attemptedKeyRef.current = attemptKey
 
     publishApi
       .connectBuffer({ code, state })

@@ -22,6 +22,7 @@ const jobSchema = z.object({
   instagram_post_type: z.enum(['feed', 'story', 'reel']).optional(),
   instagram_cover_image_url: z.string().url().optional().or(z.literal('')),
   aspect_ratios: z.array(z.enum(['1:1', '4:5', '1.91:1', '9:16'])).default([]),
+  generate_image: z.boolean().default(false),
 })
 
 type JobForm = z.infer<typeof jobSchema>
@@ -202,11 +203,13 @@ export function JobFormPage() {
       platforms: [],
       use_references: true,
       tone: 'Professional',
+      generate_image: false,
     },
   })
 
   const selectedPlatforms = watch('platforms')
   const useReferences = watch('use_references')
+  const generateImage = watch('generate_image')
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([])
   const [showReferencePicker, setShowReferencePicker] = useState(false)
   const [refSearchQuery, setRefSearchQuery] = useState('')
@@ -343,6 +346,7 @@ export function JobFormPage() {
       instagram_post_type: showInstagramOptions ? instagramPostType : undefined,
       instagram_cover_image_url: showInstagramOptions && instagramCoverImageUrl ? instagramCoverImageUrl : undefined,
       aspect_ratios: selectedAspectRatios,
+      generate_image: data.generate_image,
     }
 
     try {
@@ -367,39 +371,27 @@ export function JobFormPage() {
 
   return (
     <>
-      <div className="max-w-3xl mx-auto space-y-6">
+      <div className="w-full space-y-6 pb-12">
         <div className="flex items-center gap-4">
           <button onClick={() => navigate('/dashboard')} className="btn-ghost p-2" aria-label="Go back">
             <ArrowLeft className="h-5 w-5" />
           </button>
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">
+            <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 tracking-tight">
               {jobType === 'blog' ? 'Write Blog Post' : 'Create Social Post'}
             </h1>
-            <p className="text-gray-500">
+            <p className="text-sm text-gray-500">
               {jobType === 'blog'
-                ? 'Generate a full blog article with matching image'
-                : 'Generate posts for Instagram, Facebook & LinkedIn'}
+                ? 'Generate a comprehensive blog article with matching AI visuals'
+                : 'Generate tailored posts for Instagram, Facebook & LinkedIn'}
             </p>
           </div>
         </div>
 
-        <div className="card p-4 bg-primary-50 border-primary-100">
-          <div className="flex items-center gap-2 text-primary-700">
-            <Sparkles className="h-5 w-5" />
-            <span className="font-medium">AI-Powered Generation</span>
-            <span className="text-sm text-primary-500">→</span>
-            <span className="text-sm">Expand prompt</span>
-            <span className="text-sm text-primary-500">→</span>
-            <span className="text-sm">Write content</span>
-            <span className="text-sm text-primary-500">→</span>
-            <span className="text-sm">Generate image</span>
-            <span className="text-sm text-primary-500">→</span>
-            <span className="text-sm">Review & approve</span>
-          </div>
-        </div>
-
-        <form onSubmit={handleSubmit(onSubmit)} className="card p-6 space-y-6" noValidate>
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+          {/* Main Form (8 cols on lg) */}
+          <div className="lg:col-span-8 space-y-6">
+            <form onSubmit={handleSubmit(onSubmit)} className="card p-6 sm:p-7 space-y-6" noValidate>
           <div className="space-y-4">
             <h2 className="text-lg font-semibold text-gray-900">Content Details</h2>
 
@@ -554,7 +546,27 @@ export function JobFormPage() {
           </div>
 
           <div className="space-y-4 border-t border-gray-200 pt-6">
-            <h2 className="text-lg font-semibold text-gray-900">Image Settings</h2>
+            {/* Generate Image Toggle */}
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <input
+                  {...register('generate_image')}
+                  id="generate_image"
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500" disabled={isSubmitting}
+                />
+                <label htmlFor="generate_image" className="text-sm font-semibold text-gray-700">
+                  Generate AI Image
+                </label>
+                <p className="text-xs text-gray-500">
+                  {generateImage ? 'Image will be created alongside your content' : 'Skip image generation (text only)'}
+                </p>
+              </div>
+            </div>
+
+            {generateImage && (
+              <>
+                <h2 className="text-lg font-semibold text-gray-900">Image Settings</h2>
 
             <div>
               <label htmlFor="image_description" className="label">Image Description</label>
@@ -588,6 +600,7 @@ export function JobFormPage() {
                 Leave empty to auto-select ratios based on your chosen platforms. Available sizes are filtered by platform requirements (e.g. Instagram/LinkedIn/Facebook feed posts support 1:1, 4:5, 1.91:1).
               </p>
             </div>
+          </>)}  
 
             <div>
               <label className="label">Platforms</label>
@@ -642,11 +655,11 @@ export function JobFormPage() {
                 </div>
               )}
             </div>
-          </div>
+              </div>
 
           <div className="flex justify-end gap-3 border-t border-gray-200 pt-6">
             <button type="button" onClick={() => navigate('/dashboard')} className="btn-secondary" disabled={isSubmitting}>Cancel</button>
-            <button type="submit" className="btn-primary" disabled={isSubmitting || selectedPlatforms.length === 0}>
+            <button type="submit" className="btn-primary" disabled={isSubmitting || (generateImage && selectedPlatforms.length === 0)}>
               {isSubmitting ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin mr-2" />
@@ -662,6 +675,49 @@ export function JobFormPage() {
           </div>
         </form>
       </div>
+
+      {/* Right Sidebar Guide (4 cols on lg) */}
+      <div className="lg:col-span-4 space-y-5 lg:sticky lg:top-20">
+        <div className="card p-5 bg-primary-50/70 border border-primary-100 rounded-2xl space-y-4">
+          <div className="flex items-center gap-2 text-primary-800 font-semibold text-sm">
+            <Sparkles className="h-4 w-4 text-primary-600" />
+            <span>AI Pipeline Workflow</span>
+          </div>
+          <ol className="space-y-2.5 text-xs text-primary-950 font-medium">
+            <li className="flex items-start gap-2">
+              <span className="w-5 h-5 rounded-full bg-primary-200 text-primary-800 flex items-center justify-center text-xs flex-shrink-0">1</span>
+              <span><strong>Prompt Expansion:</strong> AI analyzes your topic and brand voice</span>
+            </li>
+            <li className="flex items-start gap-2">
+              <span className="w-5 h-5 rounded-full bg-primary-200 text-primary-800 flex items-center justify-center text-xs flex-shrink-0">2</span>
+              <span><strong>Content Draft:</strong> Writes tailored copy for each selected platform</span>
+            </li>
+            {generateImage && (
+              <li className="flex items-start gap-2">
+                <span className="w-5 h-5 rounded-full bg-primary-200 text-primary-800 flex items-center justify-center text-xs flex-shrink-0">3</span>
+                <span><strong>Image Generation:</strong> Renders imagery matched to aspect ratios</span>
+              </li>
+            )}
+            <li className="flex items-start gap-2">
+              <span className="w-5 h-5 rounded-full bg-primary-200 text-primary-800 flex items-center justify-center text-xs flex-shrink-0">
+                {generateImage ? '4' : '3'}
+              </span>
+              <span><strong>Human Review:</strong> Edit, regenerate, or publish directly</span>
+            </li>
+          </ol>
+        </div>
+
+        <div className="card p-5 rounded-2xl border border-gray-200 space-y-3">
+          <h4 className="font-semibold text-gray-900 text-sm">Tips for Great Results</h4>
+          <ul className="space-y-2 text-xs text-gray-600 leading-relaxed">
+            <li>• <strong>Be descriptive:</strong> Mention concrete details, target outcomes, or themes.</li>
+            <li>• <strong>Source context:</strong> Upload notes or briefs to ground the AI generation in factual data.</li>
+            <li>• <strong>Aspect ratios:</strong> Choose 1:1 for Instagram feed, 4:5 for LinkedIn/FB, and 9:16 for Stories/Reels.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
 
       <ReferencePickerModal
         isOpen={showReferencePicker}

@@ -1,6 +1,7 @@
 ﻿"""Prompt enhancement with local Ollama, Hugging Face, and OpenAI fallback."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -11,6 +12,9 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 
 MAX_PROMPT_ENHANCE_INPUT_CHARS = 6000
+
+# Timeout per provider call so a dead local Ollama instance doesn't hang generation
+PROMPT_ENHANCE_TIMEOUT_SECONDS = 15
 
 
 def _truncate_for_enhancement(text: str, max_chars: int = MAX_PROMPT_ENHANCE_INPUT_CHARS) -> str:
@@ -37,13 +41,16 @@ async def enhance_prompt(user_prompt: str, purpose: str = "image generation prom
     if settings.OLLAMA_PROMPT_ENHANCE_ENABLED and settings.OLLAMA_MODEL:
         try:
             client = AsyncOpenAI(api_key="ollama", base_url=settings.OLLAMA_BASE_URL)
-            resp = await client.chat.completions.create(
-                model=settings.OLLAMA_MODEL,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.4,
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=settings.OLLAMA_MODEL,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.4,
+                ),
+                timeout=PROMPT_ENHANCE_TIMEOUT_SECONDS,
             )
             content = (resp.choices[0].message.content or "").strip()
             if content:
@@ -59,13 +66,16 @@ async def enhance_prompt(user_prompt: str, purpose: str = "image generation prom
         if hf_token:
             try:
                 client = AsyncOpenAI(api_key=hf_token, base_url=hf_base_url)
-                resp = await client.chat.completions.create(
-                    model=hf_model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.4,
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=hf_model,
+                        messages=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.4,
+                    ),
+                    timeout=PROMPT_ENHANCE_TIMEOUT_SECONDS,
                 )
                 content = (resp.choices[0].message.content or "").strip()
                 if content:
@@ -77,13 +87,16 @@ async def enhance_prompt(user_prompt: str, purpose: str = "image generation prom
     if settings.OPENAI_API_KEY:
         try:
             client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-            resp = await client.chat.completions.create(
-                model=settings.OPENAI_MODEL or "gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.4,
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=settings.OPENAI_MODEL or "gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.4,
+                ),
+                timeout=PROMPT_ENHANCE_TIMEOUT_SECONDS,
             )
             content = (resp.choices[0].message.content or "").strip()
             if content:

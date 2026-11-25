@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, jobs, review, publish, library, brand, health, legal, beta, leads
+from app.api.v1.endpoints import auth, jobs, review, publish, library, brand, health, legal, beta
 
 api_router = APIRouter()
 
@@ -29,6 +29,3 @@ api_router.include_router(legal.router, prefix="/legal", tags=["Legal"])
 
 # Beta Program
 api_router.include_router(beta.router, prefix="/beta", tags=["Beta"])
-
-# Leads (CRM capture & automation)
-api_router.include_router(leads.router, prefix="/leads", tags=["Leads"])

@@ -109,3 +109,4 @@ backend/app/api/v1/endpoints/test_models.py
 # Local planning/docs (optional)
 EVENMORE_10_STEP_LAUNCH_PLAN.md
 changes.diff
+.md

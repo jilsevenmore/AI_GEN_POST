@@ -1,6 +1,6 @@
 """Main LangGraph flow for AI content generation."""
 import logging
-from typing import Dict, Any, Literal
+from typing import Dict, Any, Literal, Optional
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 # from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # Disabled due to psycopg issues
@@ -46,6 +46,14 @@ def should_regenerate(state: GenerationState) -> Literal["regenerate_text", "reg
     return "continue"
 
 
+def should_generate_image(state: GenerationState) -> Literal["generate_image", "skip_image"]:
+    """Decide whether to generate an image based on user toggle."""
+    # User toggle takes precedence: if they disabled image generation, skip it
+    if not state.job_input.generate_image:
+        return "skip_image"
+    return "generate_image"
+
+
 def create_generation_graph() -> StateGraph:
     """Create the LangGraph for content generation."""
     
@@ -56,6 +64,7 @@ def create_generation_graph() -> StateGraph:
     graph.add_node("find_references", find_references_node)
     graph.add_node("generate_text", generate_text_node)
     graph.add_node("generate_image", generate_image_node)
+    graph.add_node("skip_image", lambda state: state)  # Pass-through for blog posts
     graph.add_node("safety_check", safety_check_node)
     graph.add_node("adapt_platforms", adapt_platforms_node)
     
@@ -64,11 +73,17 @@ def create_generation_graph() -> StateGraph:
     
     graph.add_edge("expand_prompt", "find_references")
     graph.add_edge("find_references", "generate_text")
-    graph.add_edge("find_references", "generate_image")  # Parallel
     
-    # Both generation nodes must complete before safety check
+    # Conditional: generate image for social posts, skip for blogs
+    graph.add_conditional_edges(
+        "find_references",
+        should_generate_image,
+    )
+    
+    # Both generation paths converge at safety_check
     graph.add_edge("generate_text", "safety_check")
     graph.add_edge("generate_image", "safety_check")
+    graph.add_edge("skip_image", "safety_check")
     
     graph.add_edge("safety_check", "adapt_platforms")
     graph.add_edge("adapt_platforms", END)
@@ -99,6 +114,10 @@ async def run_generation_job(
     job_id_str: str,
     company_id_str: str,
     db_session_factory,
+    user_feedback: Optional[str] = None,
+    regenerate_text: bool = False,
+    regenerate_image: bool = False,
+    new_reference_ids: list = None,
 ) -> GenerationState:
     """
     Run the complete generation job as a background task.
@@ -106,13 +125,17 @@ async def run_generation_job(
     This is called from the jobs endpoint via BackgroundTasks.
     Accepts job_id and company_id as strings (avoids Pydantic serialization issues),
     then re-queries the database for full job and brand kit data.
+    
+    Optional regeneration parameters are applied to the initial state so a
+    review-driven regeneration can incorporate user feedback.
     """
     from app.db.session import AsyncSessionLocal
     from app.models.job import Job
     from app.models.brand_kit import BrandKit
-    from sqlalchemy import select
+    from sqlalchemy import select, update
     from uuid import UUID
     from app.services.ai.state import JobInput, BrandKitData
+    from datetime import datetime, timezone
     
     job_id = UUID(job_id_str)
     company_id = UUID(company_id_str)
@@ -158,6 +181,7 @@ async def run_generation_job(
             instagram_post_type=db_job.instagram_post_type,
             instagram_cover_image_url=db_job.instagram_cover_image_url,
             aspect_ratios=db_job.aspect_ratios or [],
+            generate_image=db_job.generate_image,
         )
         
         brand_kit_data = BrandKitData(
@@ -176,7 +200,16 @@ async def run_generation_job(
         
         # Create initial state using Pydantic models
         initial_state = create_initial_state(job_input, brand_kit_data)
-        
+
+        # Apply regeneration feedback if provided, so a review-driven
+        # regeneration carries the user's instructions into the state.
+        if user_feedback:
+            initial_state.user_feedback = user_feedback
+            initial_state.regenerate_text = regenerate_text
+            initial_state.regenerate_image = regenerate_image
+            initial_state.new_reference_ids = new_reference_ids or []
+            initial_state.regeneration_count += 1
+
         # Call AI nodes directly (bypasses LangGraph Pydantic serialization issues)
         from app.services.ai.nodes.expand_prompt import expand_prompt_node
         from app.services.ai.nodes.find_references import find_references_node
@@ -188,7 +221,6 @@ async def run_generation_job(
         state = initial_state
 
         async def _update_progress(step: str, progress: int, status: str = "pending"):
-            from datetime import datetime, timezone
             try:
                 await db.execute(
                     update(Job)
@@ -210,17 +242,27 @@ async def run_generation_job(
             logger.info(f"🔄 Step 1: Expanding prompt for job {job_id}")
             state = await expand_prompt_node(state)
             
-            await _update_progress("Finding references", 25, "expanding_prompt")
-            logger.info(f"🔄 Step 2: Finding references for job {job_id}")
-            state = await find_references_node(state)
+            if state.job_input.generate_image and state.job_input.use_references:
+                await _update_progress("Finding references", 25, "expanding_prompt")
+                logger.info(f"🔄 Step 2: Finding references for job {job_id}")
+                state = await find_references_node(state, db)
+            else:
+                logger.info(f"⏩ Skipping finding references for job {job_id} (generate_image={state.job_input.generate_image})")
             
             await _update_progress("Writing text", 40, "writing_text")
             logger.info(f"🔄 Step 3a: Generating text for job {job_id}")
             state = await generate_text_node(state)
             
-            await _update_progress("Generating image", 60, "generating_image")
-            logger.info(f"🔄 Step 3b: Generating image for job {job_id}")
-            state = await generate_image_node(state)
+            # Generate image only if generate_image was requested by user
+            should_gen_image = state.job_input.generate_image and (not user_feedback or regenerate_image)
+            if should_gen_image:
+                await _update_progress("Generating image", 60, "generating_image")
+                logger.info(f"🔄 Step 3b: Generating image for job {job_id}")
+                state = await generate_image_node(state)
+            else:
+                logger.info(f"⏩ Skipping image generation for job {job_id} (generate_image={state.job_input.generate_image})")
+                if not state.job_input.generate_image:
+                    state.generated_image_variants = []
             
             await _update_progress("Running safety checks", 80, "safety_check")
             logger.info(f"🔄 Step 4: Safety check for job {job_id}")
@@ -236,8 +278,6 @@ async def run_generation_job(
             
         except Exception as e:
             logger.error(f"❌ Generation job {job_id} failed: {e}", exc_info=True)
-            from sqlalchemy import update
-            from datetime import datetime, timezone
             await db.execute(
                 update(Job)
                 .where(Job.id == job_id)
@@ -264,21 +304,37 @@ async def _save_results(state: GenerationState, db, company_id) -> None:
     
     job_id = state.job_input.job_id
     
-    # Create content record
-    content = Content(
-        id=uuid4(),
-        job_id=job_id,
-        company_id=company_id,
-        type="social_post" if state.job_input.type == "post" else "blog",
-        title=state.job_input.title,
-        long_text=state.long_text or "",
-        platform_contents=[pc.model_dump(mode='json') for pc in state.platform_contents],
-        image_variants=[iv.model_dump(mode='json') for iv in state.generated_image_variants],
-        primary_image_id=str(state.generated_image_variants[0].id) if state.generated_image_variants else None,
-        safety_check_passed=state.safety_passed,
-        safety_flags=state.safety_flags,
-    )
-    db.add(content)
+    # Check if content already exists for this job (e.g. on regeneration or retry)
+    existing_result = await db.execute(select(Content).where(Content.job_id == job_id))
+    content = existing_result.scalar_one_or_none()
+    
+    primary_img_id = state.generated_image_variants[0].id if state.generated_image_variants else None
+    image_variants_json = [iv.model_dump(mode='json') for iv in state.generated_image_variants]
+    platform_contents_json = [pc.model_dump(mode='json') for pc in state.platform_contents]
+
+    if content:
+        content.title = state.job_input.title
+        content.long_text = state.long_text or ""
+        content.platform_contents = platform_contents_json
+        content.image_variants = image_variants_json
+        content.primary_image_id = primary_img_id
+        content.safety_check_passed = state.safety_check_passed
+        content.safety_flags = state.safety_flags
+    else:
+        content = Content(
+            id=uuid4(),
+            job_id=job_id,
+            company_id=company_id,
+            type="social_post" if state.job_input.type == "post" else "blog",
+            title=state.job_input.title,
+            long_text=state.long_text or "",
+            platform_contents=platform_contents_json,
+            image_variants=image_variants_json,
+            primary_image_id=primary_img_id,
+            safety_check_passed=state.safety_check_passed,
+            safety_flags=state.safety_flags,
+        )
+        db.add(content)
     
     # Update job status
     await db.execute(
@@ -327,6 +383,8 @@ async def resume_after_review(
     db,
 ) -> GenerationState:
     """Resume generation after human review with regeneration feedback."""
+    from app.db.session import AsyncSessionLocal
+
     graph = get_generation_graph()
     
     # Get current state from checkpoint
@@ -338,28 +396,14 @@ async def resume_after_review(
     
     state = GenerationState.model_validate(current_state_dict.values)
     
-    # Update state with feedback
-    state.user_feedback = feedback
-    state.regenerate_text = regenerate_text
-    state.regenerate_image = regenerate_image
-    state.new_reference_ids = new_reference_ids
-    state.regeneration_count += 1
-    state.awaiting_review = False
-    state.current_step = "regenerating"
-    state.progress = 10
-    
-    # Resume from appropriate point based on what needs regeneration
-    if regenerate_text and regenerate_image:
-        # Restart from expand_prompt with feedback
-        pass  # Would need to modify graph to support this
-    elif regenerate_text:
-        # Restart from generate_text
-        pass
-    elif regenerate_image:
-        # Restart from generate_image
-        pass
-    
-    # For now, re-run full graph with feedback incorporated
-    # In production, you'd use LangGraph's interrupt/resume properly
-    
-    return await run_generation_job(state.job_input, state.brand_kit, db)
+    # Re-run the generation from the original job input, carrying the
+    # review feedback into the new state so nodes can act on it.
+    return await run_generation_job(
+        str(state.job_input.job_id),
+        str(state.job_input.company_id),
+        AsyncSessionLocal,
+        user_feedback=feedback,
+        regenerate_text=regenerate_text,
+        regenerate_image=regenerate_image,
+        new_reference_ids=new_reference_ids,
+    )

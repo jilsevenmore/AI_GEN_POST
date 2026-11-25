@@ -4,14 +4,15 @@ import { useState, useEffect } from 'react'
 import { 
   ArrowLeft, CheckCircle, RotateCcw, Image, 
   Loader2, AlertCircle, ChevronDown, ChevronUp,
-  Copy, Hash, Layout, Send
+  Copy, Hash, Layout, Send, X
 } from 'lucide-react'
 import { useReview, useRegenerate, useApprove, createInitialEditedTexts } from '../hooks/useReview'
-import type { RegenerateRequest, ApproveRequest, Platform, PlatformContent } from '../api/types'
+import type { RegenerateRequest, ApproveRequest, Platform, PlatformContent, JobStatus } from '../api/types'
 import clsx from 'clsx'
 import { format } from 'date-fns'
-import { FreeModelNotice } from '../components/FreeModelNotice'
 import { SEO } from '../components/SEO'
+import { useToast } from '../components/Toast'
+import { jobsApi } from '../api/services'
 
 const PLATFORM_COLORS: Record<Platform, string> = {
   instagram: 'bg-gradient-to-r from-purple-500 to-pink-500',
@@ -34,6 +35,7 @@ export function ReviewPage() {
   const { jobId } = useParams<{ jobId: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { toast } = useToast()
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null)
   const [editedTexts, setEditedTexts] = useState<Record<Platform, string>>({
     instagram: '',
@@ -43,14 +45,42 @@ export function ReviewPage() {
   const [showRegenerate, setShowRegenerate] = useState(false)
   const [regenerateFeedback, setRegenerateFeedback] = useState('')
   const [scheduleAt, setScheduleAt] = useState<Date | null>(null)
-  const [showFreeModelNotice, setShowFreeModelNotice] = useState(true)
 
   // Handle undefined jobId
   const jobIdString = jobId ?? null
 
-  const { review, isLoading, error, refetch } = useReview(jobIdString)
+  const { 
+    review, 
+    job, 
+    isLoading, 
+    error, 
+    isGenerating, 
+    isGenerationComplete,
+    isGenerationFailed,
+    generationProgress,
+    generationStep,
+    generationError,
+    refetchJob,
+    refetchReview,
+  } = useReview(jobIdString)
+
   const regenerateMutation = useRegenerate(jobIdString)
   const approveMutation = useApprove(jobIdString)
+  const [isRetrying, setIsRetrying] = useState(false)
+
+  const handleRetry = async () => {
+    if (!jobIdString) return
+    setIsRetrying(true)
+    try {
+      await jobsApi.retry(jobIdString)
+      queryClient.invalidateQueries({ queryKey: ['job', jobIdString] })
+      await refetchJob()
+    } catch {
+      toast({ message: 'Failed to retry generation', type: 'error' })
+    } finally {
+      setIsRetrying(false)
+    }
+  }
 
   const content = review?.content
 
@@ -68,19 +98,96 @@ export function ReviewPage() {
     }
   }, [content])
 
-  if (isLoading) {
+  // Show generation progress while job is running
+  if (isGenerating && job) {
     return (
-      <div className="max-w-5xl mx-auto">
-        <div className="flex items-center justify-center h-96">
-          <Loader2 className="h-12 w-12 animate-spin text-primary-600" />
+      <div className="w-full">
+        <SEO title="Generating Content" description="AI is generating your content..." path={jobId ? `/review/${jobId}` : '/review'} robots="noindex,nofollow" />
+        <div className="card p-8 text-center">
+          <div className="mx-auto w-16 h-16 rounded-full bg-primary-100 flex items-center justify-center mb-6">
+            <Loader2 className="h-8 w-8 text-primary-600 animate-spin" />
+          </div>
+          <h2 className="text-xl font-semibold text-gray-900">Generating your content...</h2>
+          <p className="mt-2 text-gray-500">{generationStep}</p>
+          <div className="mt-6 w-full max-w-md mx-auto">
+            <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-primary-500 to-primary-600 transition-all duration-500"
+                style={{ width: `${generationProgress}%` }}
+              />
+            </div>
+            <p className="mt-2 text-sm text-gray-500">{generationProgress}% complete</p>
+          </div>
+          <p className="mt-4 text-xs text-gray-400">This usually takes 30-60 seconds. You can navigate away and return later.</p>
+          <button
+            onClick={() => navigate('/dashboard')}
+            className="mt-6 btn-secondary"
+          >
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Back to Dashboard
+          </button>
         </div>
       </div>
     )
   }
 
-  if (error || !content) {
+  // Show error if generation failed
+  if (isGenerationFailed && job) {
     return (
-      <div className="max-w-5xl mx-auto">
+      <div className="w-full">
+        <SEO title="Generation Failed" description="Content generation failed." path={jobId ? `/review/${jobId}` : '/review'} robots="noindex,nofollow" />
+        <div className="card p-12 text-center">
+          <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
+          <h2 className="text-lg font-medium text-gray-900">Generation Failed</h2>
+          <p className="mt-2 text-gray-500 max-w-md mx-auto">
+            {generationError || 'An error occurred during content generation. Please try again.'}
+          </p>
+          <div className="mt-6 flex justify-center gap-3">
+            <button
+              onClick={handleRetry}
+              disabled={isRetrying}
+              className="btn-primary"
+            >
+              <RotateCcw className={clsx("h-4 w-4 mr-2", isRetrying && "animate-spin")} />
+              {isRetrying ? 'Retrying...' : 'Retry Generation'}
+            </button>
+            <button
+              onClick={() => navigate('/dashboard')}
+              className="btn-secondary"
+            >
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back to Dashboard
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Show error if the job/review fetch failed (generation errors are handled above)
+  if (error) {
+    return (
+      <div className="w-full">
+        <div className="card p-12 text-center">
+          <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
+          <h2 className="text-lg font-medium text-gray-900">Unable to load content</h2>
+          <p className="mt-1 text-gray-500">{error instanceof Error ? error.message : String(error || 'Please try again.')}</p>
+          <button
+            onClick={() => navigate('/dashboard')}
+            className="mt-4 btn-primary"
+          >
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Back to Dashboard
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // Show "content not found" when generation completed but no content exists
+  if (!content && isGenerationComplete) {
+    return (
+      <div className="w-full">
         <div className="card p-12 text-center">
           <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
           <h2 className="text-lg font-medium text-gray-900">Content not found</h2>
@@ -97,11 +204,64 @@ export function ReviewPage() {
     )
   }
 
+  // Still loading initial job status
+  if (isLoading) {
+    return (
+      <div className="w-full">
+        <div className="flex items-center justify-center h-96">
+          <Loader2 className="h-12 w-12 animate-spin text-primary-600" />
+        </div>
+      </div>
+    )
+  }
+
+  // Fallback: content should exist once loading finishes
+  if (!content) {
+    return (
+      <div className="w-full">
+        <div className="card p-12 text-center">
+          <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
+          <h2 className="text-lg font-medium text-gray-900">Content not found</h2>
+          <p className="mt-1 text-gray-500">This content may have been deleted or the link is invalid.</p>
+          <button
+            onClick={() => navigate('/dashboard')}
+            className="mt-4 btn-primary"
+          >
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Back to Dashboard
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // Guard: platform content must exist for the review page to render properly
+  if (content.platform_contents.length === 0) {
+    return (
+      <div className="w-full">
+        <div className="card p-12 text-center">
+          <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
+          <h2 className="text-lg font-medium text-gray-900">Content generation incomplete</h2>
+          <p className="mt-1 text-gray-500">
+            No platform-specific content was generated. This can happen if no platforms were selected when creating the job. Please create a new job with at least one platform selected.
+          </p>
+          <button
+            onClick={() => navigate('/dashboard')}
+            className="mt-4 btn-primary"
+          >
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Back to Dashboard
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   const primaryImage = content.image_variants.find((v) => v.id === selectedImageId) || content.image_variants[0]
 
   const handleApprove = () => {
-    if (!selectedImageId) {
-      alert('Please select an image')
+    if (content.image_variants.length > 0 && !selectedImageId) {
+      toast({ message: 'Please select an image first', type: 'error' })
       return
     }
 
@@ -109,7 +269,7 @@ export function ReviewPage() {
 
     approveMutation.mutate(
       {
-        selected_image_id: selectedImageId,
+        selected_image_id: selectedImageId || undefined,
         edited_text: Object.keys(editedTexts).some(
           (k) => editedTexts[k as Platform] !== content.platform_contents.find((pc) => pc.platform === k)?.text
         )
@@ -119,11 +279,11 @@ export function ReviewPage() {
         auto_publish: true,
       },
       {
-        onSuccess: (response) => {
+        onSuccess: (response: { data: { id: string } }) => {
           navigate(`/publish/${response.data.id}`)
         },
         onError: (err: any) => {
-          alert(err?.response?.data?.detail || 'Failed to approve/publish content')
+          toast({ message: err?.response?.data?.detail || 'Failed to approve/publish content', type: 'error' })
         },
       }
     )
@@ -131,30 +291,29 @@ export function ReviewPage() {
 
   const handleRegenerate = () => {
     if (!regenerateFeedback.trim()) {
-      alert('Please provide feedback for regeneration')
+      toast({ message: 'Please provide feedback for regeneration', type: 'error' })
       return
     }
 
     regenerateMutation.mutate({
       feedback: regenerateFeedback,
       regenerate_text: true,
-      regenerate_image: true,
+      regenerate_image: (content.image_variants?.length ?? 0) > 0,
       reference_image_ids: [],
     })
   }
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text)
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // clipboard access denied or unavailable
+    }
   }
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="w-full space-y-6 pb-12">
       <SEO title="Review Content" description="Review and approve generated content." path={jobId ? `/review/${jobId}` : '/review'} robots="noindex,nofollow" />
-      {/* Free Model Notice */}
-      <FreeModelNotice 
-        isVisible={showFreeModelNotice} 
-        onDismiss={() => setShowFreeModelNotice(false)} 
-      />
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -167,9 +326,19 @@ export function ReviewPage() {
         </button>
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Review & Approve</h1>
-          <p className="text-gray-500">Review the generated content and image before publishing</p>
+          <p className="text-gray-500">
+            Review the generated content{content.image_variants.length > 0 ? ' and image' : ''} before publishing
+          </p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => { refetchJob(); refetchReview(); }}
+            className="btn-ghost p-2"
+            aria-label="Refresh status"
+            title="Refresh generation status"
+          >
+            <RotateCcw className="h-5 w-5" />
+          </button>
           <button
             onClick={handleApprove}
             disabled={approveMutation.isPending}
@@ -248,8 +417,10 @@ export function ReviewPage() {
       )}
 
       <div className="grid lg:grid-cols-3 gap-6">
-        {/* Image Panel */}
-        <div className="lg:col-span-1 space-y-4">
+          {content.image_variants.length > 0 ? (
+            <>
+              {/* Image Panel */}
+              <div className="lg:col-span-1 space-y-4">
           <div className="card">
             <div className="p-4 border-b border-gray-200 flex items-center justify-between">
               <h3 className="font-semibold text-gray-900">Generated Images</h3>
@@ -292,21 +463,23 @@ export function ReviewPage() {
             <h4 className="font-medium text-gray-900 mb-3">Selected Image</h4>
             <div className="aspect-square rounded-lg overflow-hidden bg-gray-100">
               <img
-                src={primaryImage.url}
+                src={primaryImage!.url}
                 alt="Selected image"
                 className="w-full h-full object-cover"
               />
             </div>
             <div className="mt-3 space-y-2 text-sm text-gray-600">
-              <p><strong>Aspect:</strong> {primaryImage.aspect_ratio}</p>
-              <p><strong>Size:</strong> {primaryImage.width}×{primaryImage.height}</p>
-              <p className="truncate"><strong>Prompt:</strong> {primaryImage.prompt_used}</p>
+              <p><strong>Aspect:</strong> {primaryImage!.aspect_ratio}</p>
+              <p><strong>Size:</strong> {primaryImage!.width}×{primaryImage!.height}</p>
+              <p className="truncate"><strong>Prompt:</strong> {primaryImage!.prompt_used}</p>
+            </div>
             </div>
           </div>
-        </div>
+            </>
+          ) : null}
 
         {/* Text Panel */}
-        <div className="lg:col-span-2 space-y-6">
+        <div className={clsx('space-y-6', content.image_variants.length > 0 ? 'lg:col-span-2' : 'lg:col-span-3')}>
           {/* Platform Tabs */}
           <div className="card">
             <div className="border-b border-gray-200">

@@ -141,12 +141,17 @@ async def adapt_platforms_node(state: GenerationState) -> GenerationState:
     job = state.job_input
     brand = state.brand_kit
     
-    if not job.platforms:
-        state.error = "No platforms specified"
-        return state
-    
     core_content = state.generated_text or state.long_text or ""
     long_text = state.long_text or core_content
+    
+    if not job.platforms:
+        # No platforms specified — create a single default platform content
+        # so the review page still has text to display (text-only mode).
+        state.platform_contents = _create_fallback_adaptations(job, brand, core_content, long_text)
+        state.current_step = "awaiting_review"
+        state.progress = 95
+        state.awaiting_review = True
+        return state
     
     # Build platform specs for requested platforms
     requested_specs = []
@@ -221,6 +226,17 @@ def _create_fallback_adaptations(job, brand, core_content, long_text) -> list:
     from app.services.ai.state import PlatformContent
     
     adaptations = []
+    
+    # If no platforms specified, create a single default platform content
+    # so the review page still has text to display (text-only mode).
+    if not job.platforms:
+        adaptations.append(PlatformContent(
+            platform="linkedin",
+            text=long_text or core_content or "",
+            hashtags=_extract_hashtags(job.keywords, brand.company_name, 8),
+            character_count=len(long_text or core_content or ""),
+        ))
+        return adaptations
     
     if "linkedin" in job.platforms:
         adaptations.append(PlatformContent(

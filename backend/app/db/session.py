@@ -36,7 +36,6 @@ from app.models import (  # noqa: F401,E402
     ChannelConnection,
     PublishAttempt,
     Quota,
-    Lead,
 )
 
 

@@ -44,22 +44,26 @@ class JobInput(BaseModel):
         default_factory=list,
         description="User-requested image aspect ratios. Empty = auto-select based on platforms.",
     )
+    generate_image: bool = Field(
+        default=False,
+        description="Whether to generate an image alongside the content. If false, image generation is skipped entirely.",
+    )
 
 
 class TextBrief(BaseModel):
     """Detailed brief for text generation."""
-    outline: str
-    key_points: List[str]
-    target_length: int
-    style_guidance: str
+    outline: str = ""
+    key_points: List[str] = Field(default_factory=list)
+    target_length: int = 500
+    style_guidance: str = "Professional"
 
 
 class ImageBrief(BaseModel):
     """Detailed brief for image generation."""
-    prompt: str
-    style_keywords: List[str]
-    composition_guidance: str
-    aspect_ratio: str
+    prompt: str = ""
+    style_keywords: List[str] = Field(default_factory=list)
+    composition_guidance: str = "Clean, centered composition"
+    aspect_ratio: str = "1:1"
     reference_roles: Dict[str, str] = Field(default_factory=dict)  # image_id -> role
 
 
@@ -119,8 +123,16 @@ class GenerationState(BaseModel):
     long_text: Optional[str] = None  # For blog/LinkedIn
     
     # Step 4: Safety check
-    safety_passed: bool = True
+    safety_check_passed: bool = True
     safety_flags: List[str] = Field(default_factory=list)
+
+    @property
+    def safety_passed(self) -> bool:
+        return self.safety_check_passed
+
+    @safety_passed.setter
+    def safety_passed(self, value: bool) -> None:
+        self.safety_check_passed = value
     
     # Step 5: Adapt per platform
     platform_contents: List[PlatformContent] = Field(default_factory=list)

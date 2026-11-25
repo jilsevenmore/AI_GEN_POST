@@ -137,7 +137,7 @@ export function BrandKitPage() {
 
   if (isLoading) {
     return (
-      <div className="max-w-3xl mx-auto">
+      <div className="w-full">
         <div className="flex items-center justify-center h-64">
           <Loader2 className="h-12 w-12 animate-spin text-primary-600" />
         </div>
@@ -147,7 +147,7 @@ export function BrandKitPage() {
 
   if (error) {
     return (
-      <div className="max-w-3xl mx-auto">
+      <div className="w-full">
         <div className="card p-8 text-center">
           <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
           <h2 className="text-lg font-medium text-gray-900">Failed to load brand kit</h2>
@@ -156,30 +156,34 @@ export function BrandKitPage() {
     )
   }
 
+  const watchedCompanyName = watch('company_name') || brand?.company_name || 'Your Company'
+  const watchedTagline = watch('tagline') || brand?.tagline || 'Your brand tagline goes here'
+  const watchedTone = watch('tone') || brand?.tone || 'Professional'
+
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className="w-full space-y-6 pb-12">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Brand Kit</h1>
-        <p className="text-gray-500">Manage your company identity and AI preferences</p>
+        <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 tracking-tight">Brand Kit</h1>
+        <p className="text-sm text-gray-500">Configure your company identity, styling guidelines, and AI generation tone</p>
       </div>
 
       {/* Tabs */}
       <div className="card">
         <div className="border-b border-gray-200">
-          <nav className="flex gap-1 p-1" aria-label="Brand kit tabs">
+          <nav className="flex gap-1 p-1.5" aria-label="Brand kit tabs">
             {[
-              { id: 'details', label: 'Details', icon: null },
-              { id: 'logo', label: 'Logo', icon: Image },
-              { id: 'advanced', label: 'Advanced', icon: null },
+              { id: 'details', label: 'Brand Details', icon: null },
+              { id: 'logo', label: 'Company Logo', icon: Image },
+              { id: 'advanced', label: 'AI Privacy & Settings', icon: null },
             ].map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as typeof activeTab)}
                 className={clsx(
-                  'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+                  'flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors',
                   activeTab === tab.id
-                    ? 'bg-primary-50 text-primary-700'
+                    ? 'bg-primary-50 text-primary-700 shadow-xs'
                     : 'text-gray-600 hover:bg-gray-100'
                 )}
               >
@@ -190,115 +194,161 @@ export function BrandKitPage() {
           </nav>
         </div>
 
-        <div className="p-6">
+        <div className="p-5 sm:p-7">
           {activeTab === 'details' && (
-            <form onSubmit={handleSubmit(onSubmit)} className="space-y-6" noValidate>
-              <div>
-                <label htmlFor="company_name" className="label">Company Name *</label>
-                <input
-                  {...register('company_name')}
-                  id="company_name"
-                  type="text"
-                  className="input"
-                  placeholder="Acme Inc."
-                />
-                {errors.company_name && <p className="mt-1 text-sm text-red-600">{errors.company_name.message}</p>}
-              </div>
-
-              <div>
-                <label htmlFor="tagline" className="label">Tagline</label>
-                <input
-                  {...register('tagline')}
-                  id="tagline"
-                  type="text"
-                  className="input"
-                  placeholder="Empowering businesses with AI"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="address" className="label">Address</label>
-                <textarea
-                  {...register('address')}
-                  id="address"
-                  rows={2}
-                  className="input"
-                  placeholder="123 Main St, San Francisco, CA 94102"
-                />
-                <p className="mt-1 text-sm text-gray-500">Used in generated images (added via code, not AI).</p>
-              </div>
-
-              <div className="grid sm:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+              {/* Form on left (7 cols on lg) */}
+              <form onSubmit={handleSubmit(onSubmit)} className="lg:col-span-7 space-y-5" noValidate>
                 <div>
-                  <label htmlFor="primary_color" className="label">Primary Color</label>
-                  <div className="flex items-center gap-3">
-                    <input
-                      {...register('primary_color')}
-                      id="primary_color"
-                      type="color"
-                      className="h-10 w-10 rounded-lg border border-gray-300 cursor-pointer"
-                    />
-                    <input
-                      {...register('primary_color')}
-                      type="text"
-                      className="input flex-1 font-mono"
-                      placeholder="#2563EB"
-                    />
+                  <label htmlFor="company_name" className="label font-medium">Company Name *</label>
+                  <input
+                    {...register('company_name')}
+                    id="company_name"
+                    type="text"
+                    className="input"
+                    placeholder="Acme Inc."
+                  />
+                  {errors.company_name && <p className="mt-1 text-sm text-red-600">{errors.company_name.message}</p>}
+                </div>
+
+                <div>
+                  <label htmlFor="tagline" className="label font-medium">Tagline</label>
+                  <input
+                    {...register('tagline')}
+                    id="tagline"
+                    type="text"
+                    className="input"
+                    placeholder="Empowering businesses with AI"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="address" className="label font-medium">Address</label>
+                  <textarea
+                    {...register('address')}
+                    id="address"
+                    rows={2}
+                    className="input"
+                    placeholder="123 Main St, San Francisco, CA 94102"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">Rendered accurately onto generated images via deterministic code.</p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="primary_color" className="label font-medium">Primary Brand Color</label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        {...register('primary_color')}
+                        id="primary_color"
+                        type="color"
+                        className="h-10 w-10 rounded-lg border border-gray-300 cursor-pointer flex-shrink-0"
+                      />
+                      <input
+                        {...register('primary_color')}
+                        type="text"
+                        className="input flex-1 font-mono text-sm"
+                        placeholder="#2563EB"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label htmlFor="secondary_color" className="label font-medium">Secondary Accent Color</label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        {...register('secondary_color')}
+                        id="secondary_color"
+                        type="color"
+                        className="h-10 w-10 rounded-lg border border-gray-300 cursor-pointer flex-shrink-0"
+                      />
+                      <input
+                        {...register('secondary_color')}
+                        type="text"
+                        className="input flex-1 font-mono text-sm"
+                        placeholder="#7C3AED"
+                      />
+                    </div>
                   </div>
                 </div>
 
                 <div>
-                  <label htmlFor="secondary_color" className="label">Secondary Color</label>
-                  <div className="flex items-center gap-3">
-                    <input
-                      {...register('secondary_color')}
-                      id="secondary_color"
-                      type="color"
-                      className="h-10 w-10 rounded-lg border border-gray-300 cursor-pointer"
-                    />
-                    <input
-                      {...register('secondary_color')}
-                      type="text"
-                      className="input flex-1 font-mono"
-                      placeholder="#7C3AED"
-                    />
+                  <label htmlFor="tone" className="label font-medium">Default Tone of Voice</label>
+                  <select
+                    {...register('tone')}
+                    id="tone"
+                    className="input"
+                  >
+                    {TONE_OPTIONS.map((tone) => (
+                      <option key={tone} value={tone}>{tone}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-4 border-t border-gray-200">
+                  <button
+                    type="submit"
+                    disabled={updateMutation.isPending || !isDirty}
+                    className="btn-primary px-6"
+                  >
+                    {updateMutation.isPending ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                        Saving...
+                      </>
+                    ) : (
+                      <>
+                        <Save className="h-4 w-4 mr-2" />
+                        Save Changes
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+
+              {/* Live Preview on right (5 cols on lg) */}
+              <div className="lg:col-span-5 space-y-4 lg:sticky lg:top-20">
+                <div className="p-5 rounded-2xl border border-gray-200 bg-gray-50/70 space-y-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Live Brand Preview</h3>
+                  
+                  {/* Brand Card Mockup */}
+                  <div 
+                    className="p-5 rounded-xl shadow-xs text-white space-y-3 transition-colors duration-200"
+                    style={{
+                      background: `linear-gradient(135deg, ${primaryColor} 0%, ${secondaryColor} 100%)`
+                    }}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-white/20 backdrop-blur-xs">
+                        {watchedTone}
+                      </span>
+                      {brand?.logo_url && (
+                        <img src={brand.logo_url} alt="Logo" className="h-6 w-auto object-contain brightness-0 invert" />
+                      )}
+                    </div>
+                    <div>
+                      <h4 className="text-xl font-bold leading-tight">{watchedCompanyName}</h4>
+                      <p className="text-xs text-white/80 mt-1">{watchedTagline}</p>
+                    </div>
+                  </div>
+
+                  {/* Color Palettes Breakdown */}
+                  <div className="space-y-2 pt-2">
+                    <p className="text-xs font-medium text-gray-600">Palette Values</p>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-gray-200">
+                        <div className="w-5 h-5 rounded-md flex-shrink-0 shadow-2xs" style={{ backgroundColor: primaryColor }} />
+                        <span className="font-mono text-gray-700">{primaryColor}</span>
+                      </div>
+                      <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-gray-200">
+                        <div className="w-5 h-5 rounded-md flex-shrink-0 shadow-2xs" style={{ backgroundColor: secondaryColor }} />
+                        <span className="font-mono text-gray-700">{secondaryColor}</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
-
-              <div>
-                <label htmlFor="tone" className="label">Default Tone</label>
-                <select
-                  {...register('tone')}
-                  id="tone"
-                  className="input"
-                >
-                  {TONE_OPTIONS.map((tone) => (
-                    <option key={tone} value={tone}>{tone}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex items-center justify-end gap-3 pt-4 border-t border-gray-200">
-                <button
-                  type="submit"
-                  disabled={updateMutation.isPending || !isDirty}
-                  className="btn-primary"
-                >
-                  {updateMutation.isPending ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <Save className="h-4 w-4 mr-2" />
-                      Save Changes
-                    </>
-                  )}
-                </button>
-              </div>
-            </form>
+            </div>
           )}
 
           {activeTab === 'logo' && (

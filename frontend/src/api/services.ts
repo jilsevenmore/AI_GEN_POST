@@ -1,6 +1,8 @@
 import api from './client'
 import type {
   Token, UserRegister, UserLogin, UserResponse,
+  ForgotPasswordRequest, ForgotPasswordResponse,
+  ResetPasswordRequest, ResetPasswordResponse,
   JobCreate, JobResponse, JobListResponse, JobStatus, SourceFileUploadResponse,
   ContentResponse, ReviewResponse, RegenerateRequest, ApproveRequest,
   ChannelConnection, PublishRequest, PublishAttemptResponse,
@@ -8,7 +10,6 @@ import type {
   LibraryImageResponse, LibrarySearchResponse, LibrarySearchRequest, SaveToLibraryRequest, ImageTag,
   BrandKitResponse, BrandKitCreate, BrandKitUpdate,
   QuotaResponse,
-  LeadCreate, LeadResponse, LeadUpdate, LeadStatsResponse,
 } from './types'
 
 // Auth
@@ -18,6 +19,10 @@ export const authApi = {
   refresh: (refreshToken: string) => api.post<Token>('/auth/refresh', { refresh_token: refreshToken }),
   me: () => api.get<UserResponse>('/auth/me'),
   logout: () => api.post('/auth/logout'),
+  forgotPassword: (data: ForgotPasswordRequest) =>
+    api.post<ForgotPasswordResponse>('/auth/forgot-password', data),
+  resetPassword: (data: ResetPasswordRequest) =>
+    api.post<ResetPasswordResponse>('/auth/reset-password', data),
 }
 
 // Jobs
@@ -27,6 +32,7 @@ export const jobsApi = {
     api.get<JobListResponse>('/jobs', { params }),
   get: (id: string) => api.get<JobResponse>(`/jobs/${id}`),
   cancel: (id: string) => api.delete(`/jobs/${id}`),
+  retry: (id: string) => api.post<JobResponse>(`/jobs/${id}/retry`),
   simulateProgress: (id: string) => api.post<JobResponse>(`/jobs/${id}/simulate-progress`),
   uploadSourceFile: (jobId: string, file: File) => {
     const formData = new FormData()
@@ -53,8 +59,10 @@ export const publishApi = {
   connectBuffer: (data: BufferConnectRequest) => 
     api.post<ChannelConnection>('/publish/buffer/connect', data),
   disconnectChannel: (channelId: string) => api.delete(`/publish/buffer/channels/${channelId}`),
-  publish: (data: PublishRequest) => 
+  publish: (data: PublishRequest) =>
     api.post<PublishAttemptResponse[]>('/publish', data),
+  schedule: (data: PublishRequest) =>
+    api.post<PublishAttemptResponse[]>('/publish/schedule', data),
   getAttempts: (contentId: string) => 
     api.get<PublishAttemptResponse[]>(`/publish/attempts/${contentId}`),
   retry: (attemptId: string) => 
@@ -129,20 +137,3 @@ export const betaApi = {
   getDashboard: () => api.get('/beta/dashboard'),
 }
 
-// Leads
-export const leadApi = {
-  create: (data: LeadCreate) =>
-    api.post<LeadResponse>('/leads', data),
-  list: (params?: {
-    page?: number
-    page_size?: number
-    status?: string
-    source?: string
-    search?: string
-  }) => api.get<LeadResponse[]>('/leads', { params }),
-  get: (leadId: string) =>
-    api.get<LeadResponse>(`/leads/${leadId}`),
-  update: (leadId: string, data: LeadUpdate) =>
-    api.patch<LeadResponse>(`/leads/${leadId}`, data),
-  getStats: () => api.get<LeadStatsResponse>('/leads/stats'),
-}

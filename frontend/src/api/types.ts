@@ -49,6 +49,23 @@ export interface UserLogin {
   password: string
 }
 
+export interface ForgotPasswordRequest {
+  email: string
+}
+
+export interface ForgotPasswordResponse {
+  message: string
+}
+
+export interface ResetPasswordRequest {
+  code: string
+  new_password: string
+}
+
+export interface ResetPasswordResponse {
+  message: string
+}
+
 export interface UserResponse {
   id: UUID
   email: string
@@ -94,6 +111,7 @@ export interface JobCreate {
   instagram_post_type?: string
   instagram_cover_image_url?: string
   aspect_ratios?: ImageAspectRatio[]
+  generate_image?: boolean
 }
 
 export interface JobResponse extends IDMixin, TimestampMixin {
@@ -117,6 +135,7 @@ export interface JobResponse extends IDMixin, TimestampMixin {
   instagram_post_type?: string
   instagram_cover_image_url?: string
   aspect_ratios?: ImageAspectRatio[]
+  generate_image?: boolean
 }
 
 export interface JobListResponse {
@@ -175,7 +194,7 @@ export interface RegenerateRequest {
 }
 
 export interface ApproveRequest {
-  selected_image_id: UUID
+  selected_image_id?: UUID
   edited_text?: Record<Platform, string>
   schedule_at?: string
   channel_ids?: UUID[]
@@ -392,40 +411,4 @@ export interface BetaDashboardResponse {
   }>
 }
 
-// ---------------------------------------------------------------------------
-// Leads (Steps 4, 6, 10)
-// ---------------------------------------------------------------------------
 
-export type LeadStatus = 'new' | 'contacted' | 'qualified' | 'proposal' | 'closed_won' | 'closed_lost'
-export type LeadSource = 'landing_page' | 'ad' | 'referral' | 'other'
-
-export interface LeadBase {
-  name: string
-  email: string
-  company?: string
-  phone?: string
-  interest?: string
-  source?: LeadSource
-  status?: LeadStatus
-  score?: number
-  assigned_owner?: string
-  next_follow_up?: string
-  notes?: string
-}
-
-export interface LeadCreate extends LeadBase {}
-
-export interface LeadUpdate extends Partial<LeadBase> {}
-
-export interface LeadResponse extends LeadBase, IDMixin, TimestampMixin {
-  company_id?: UUID
-}
-
-export interface LeadStatsResponse {
-  total_leads: number
-  by_status: Record<string, number>
-  by_source: Record<string, number>
-  conversion_rate: number
-  average_score: number
-  leads_this_month: number
-}

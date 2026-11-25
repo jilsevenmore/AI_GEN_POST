@@ -265,10 +265,13 @@ class ModelRouter:
         # Add timeout via asyncio
         import asyncio
         try:
-            return await asyncio.wait_for(
+            # ainvoke returns AIMessage in newer LangChain, wrap in ChatResult for compatibility
+            response = await asyncio.wait_for(
                 model.ainvoke(messages),
                 timeout=60.0,  # 60 second timeout
             )
+            # Wrap AIMessage in ChatResult format expected by nodes
+            return ChatResult(generations=[ChatGeneration(message=response)])
         except asyncio.TimeoutError:
             raise RuntimeError(f"Model {config.name} timed out")
     

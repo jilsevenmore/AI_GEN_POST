@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1d4ed8"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect x="60" y="60" width="1080" height="510" rx="32" fill="rgba(255,255,255,0.08)"/>
+  <g transform="translate(120,210)">
+    <rect width="96" height="96" rx="24" fill="#ffffff"/>
+    <text x="48" y="66" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="56" font-weight="700" fill="#2563eb">E</text>
+  </g>
+  <text x="250" y="275" font-family="Inter, Arial, sans-serif" font-size="72" font-weight="700" fill="#ffffff">EVENMORE INFOTECH</text>
+  <text x="120" y="360" font-family="Inter, Arial, sans-serif" font-size="40" font-weight="500" fill="#e0e7ff">ERP • CRM • HRMS • Inventory • PMS • Custom Software</text>
+  <text x="120" y="430" font-family="Inter, Arial, sans-serif" font-size="30" fill="#dbeafe">Business software for Indian companies</text>
+  <text x="120" y="520" font-family="Inter, Arial, sans-serif" font-size="26" fill="#bfdbfe">evenmoreinfotech.com</text>
+</svg>

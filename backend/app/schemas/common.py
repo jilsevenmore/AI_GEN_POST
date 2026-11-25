@@ -170,6 +170,10 @@ class JobCreate(BaseModel):
         default_factory=list,
         description="Desired image aspect ratios (e.g. ['1:1', '4:5']). Empty = auto-select based on platforms.",
     )
+    generate_image: bool = Field(
+        default=False,
+        description="Whether to generate an image alongside the content. If false, image generation is skipped entirely.",
+    )
 
 
 class JobResponse(IDMixin, TimestampMixin):
@@ -193,6 +197,7 @@ class JobResponse(IDMixin, TimestampMixin):
     instagram_post_type: Optional[str] = None
     instagram_cover_image_url: Optional[str] = None
     aspect_ratios: Optional[List[ImageAspectRatio]] = None
+    generate_image: bool = False
 
     class Config:
         from_attributes = True
@@ -267,7 +272,7 @@ class RegenerateRequest(BaseModel):
 
 
 class ApproveRequest(BaseModel):
-    selected_image_id: UUID
+    selected_image_id: Optional[UUID] = None
     edited_text: Optional[Dict[Platform, str]] = None  # Platform -> edited text
     schedule_at: Optional[datetime] = None  # If None, publish now
     channel_ids: Optional[List[UUID]] = None  # If provided, publish only to these channels
@@ -280,6 +285,28 @@ class ReviewResponse(BaseModel):
     can_regenerate: bool
     regeneration_count: int
     max_regenerations: int
+
+
+# ==========================================
+# Password Reset Schemas
+# ==========================================
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+
+
+class ResetPasswordRequest(BaseModel):
+    code: str
+    new_password: str
+
+
+class ResetPasswordResponse(BaseModel):
+    message: str
 
 
 # ==========================================

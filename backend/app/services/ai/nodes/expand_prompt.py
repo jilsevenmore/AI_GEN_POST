@@ -153,27 +153,30 @@ async def expand_prompt_node(state: GenerationState) -> GenerationState:
             style_guidance=f"Tone: {context['tone']}. Audience: {context['audience']}.",
         )
     
-    # Generate image brief
-    image_prompt = IMAGE_BRIEF_PROMPT.format(**context) + source_context
-    image_messages = [
-        SystemMessage(content=image_prompt),
-        HumanMessage(content="Generate the image brief."),
-    ]
-    
-    try:
-        image_result = await router.ainvoke(image_messages, require_json=True)
-        image_brief_data = json.loads(image_result.generations[0].text)
-        state.image_brief = ImageBrief(**image_brief_data)
-    except Exception as e:
-        logger.error(f"Image brief generation failed: {e}")
-        # Fallback brief
-        state.image_brief = ImageBrief(
-            prompt=f"Professional image about {job.topic}, {context['tone']} style",
-            style_keywords=["professional", "clean", "modern"],
-            composition_guidance="Centered composition, good lighting",
-            aspect_ratio="1:1",
-            reference_roles={},
-        )
+    # Generate image brief only if image generation is enabled
+    if job.generate_image:
+        image_prompt = IMAGE_BRIEF_PROMPT.format(**context) + source_context
+        image_messages = [
+            SystemMessage(content=image_prompt),
+            HumanMessage(content="Generate the image brief."),
+        ]
+        
+        try:
+            image_result = await router.ainvoke(image_messages, require_json=True)
+            image_brief_data = json.loads(image_result.generations[0].text)
+            state.image_brief = ImageBrief(**image_brief_data)
+        except Exception as e:
+            logger.error(f"Image brief generation failed: {e}")
+            # Fallback brief
+            state.image_brief = ImageBrief(
+                prompt=f"Professional image about {job.topic}, {context['tone']} style",
+                style_keywords=["professional", "clean", "modern"],
+                composition_guidance="Centered composition, good lighting",
+                aspect_ratio="1:1",
+                reference_roles={},
+            )
+    else:
+        state.image_brief = None
     
     # Update progress
     state.current_step = "finding_references"

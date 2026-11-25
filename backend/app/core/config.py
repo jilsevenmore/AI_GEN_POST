@@ -92,10 +92,6 @@ class Settings(BaseSettings):
     BUFFER_API_BASE: str = "https://api.bufferapp.com/1"
     BUFFER_RATE_LIMIT_RPM: int = 100  # per 15 min per app
 
-    # Django CRM Integration (Step 4)
-    DJANGO_CRM_API_URL: Optional[str] = None
-    DJANGO_CRM_AUTH_TOKEN: Optional[str] = None
-
     # Advertising Pixels (Step 5)
     META_PIXEL_ID: Optional[str] = None
     GOOGLE_MEASUREMENT_ID: Optional[str] = None
@@ -118,6 +114,17 @@ class Settings(BaseSettings):
     ENABLE_BRAND_KIT: bool = True
     ENABLE_BUFFER_PUBLISHING: bool = True
     ENABLE_FREE_MODELS_FIRST: bool = True
+
+    # Email (Password Reset) - Free mailer compatible
+    # Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS in .env to send real emails.
+    # In development, emails are logged to console + reset_codes.log file.
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SMTP_USER: Optional[str] = None
+    SMTP_PASS: Optional[str] = None
+    SMTP_FROM_EMAIL: str = "noreply@aigenpost.local"
+    SMTP_FROM_NAME: str = "AI Gen Post"
+    EMAIL_RESET_CODE_EXPIRE_MINUTES: int = 15
 
 
 @lru_cache

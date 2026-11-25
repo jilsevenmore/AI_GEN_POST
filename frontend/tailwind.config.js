@@ -43,6 +43,9 @@ export default {
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
       },
+      letterSpacing: {
+        wide: '0.25em',
+      },
     },
   },
   plugins: [],

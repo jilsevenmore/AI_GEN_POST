@@ -41,6 +41,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Suppress /v1/models access logs (probed by OpenCode CLI)
+import logging as _logging
+
+
+class _SkipModelsAccessLog(_logging.Filter):
+    def filter(self, record: _logging.LogRecord) -> bool:
+        return "/v1/models" not in record.getMessage()
+
+
+_logging.getLogger("uvicorn.access").addFilter(_SkipModelsAccessLog())
+
 # Include API router
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 

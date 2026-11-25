@@ -61,6 +61,7 @@ async def create_job(
         instagram_post_type=job_data.instagram_post_type,
         instagram_cover_image_url=job_data.instagram_cover_image_url,
         aspect_ratios=filtered_ratios,
+        generate_image=job_data.generate_image,
         status=JobStatus.pending,
         progress=0,
         current_step="queued",
@@ -97,9 +98,10 @@ async def create_job(
         use_references=job_data.use_references,
         reference_image_ids=job_data.reference_image_ids,
         source_context=job_data.source_context,
-        instagram_post_type=job_data.instagram_post_type.value if job_data.instagram_post_type else None,
+        instagram_post_type=job_data.instagram_post_type,
         instagram_cover_image_url=job_data.instagram_cover_image_url,
         aspect_ratios=filtered_ratios,
+        generate_image=job_data.generate_image,
     )
     
     brand_kit_data = BrandKitData(
@@ -302,6 +304,44 @@ async def cancel_job(
     await db.commit()
     
     return None
+
+
+@router.post("/{job_id}/retry", response_model=JobResponse)
+async def retry_job(
+    job_id: UUID,
+    background_tasks: BackgroundTasks,
+    current_company = Depends(get_current_company),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retry a failed generation job."""
+    result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.company_id == current_company.id)
+    )
+    job = result.scalar_one_or_none()
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if job.status != JobStatus.failed:
+        raise HTTPException(status_code=400, detail="Only failed jobs can be retried")
+    
+    job.status = JobStatus.pending
+    job.progress = 0
+    job.current_step = "queued"
+    job.error = None
+    job.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(job)
+    
+    from app.db.session import AsyncSessionLocal
+    background_tasks.add_task(
+        run_generation_job,
+        str(job.id),
+        str(current_company.id),
+        AsyncSessionLocal,
+    )
+    
+    return JobResponse.model_validate(job)
 
 
 # Keep simulate-progress for testing (can remove later)

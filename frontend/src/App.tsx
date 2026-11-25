@@ -2,6 +2,8 @@ import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
+import { ResetPasswordPage } from './pages/ResetPasswordPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { JobFormPage } from './pages/JobFormPage'
 import { ReviewPage } from './pages/ReviewPage'
@@ -12,12 +14,8 @@ import { SettingsPage } from './pages/SettingsPage'
 import { LegalPage } from './pages/LegalPage'
 import { OnboardingPage } from './pages/OnboardingPage'
 import { BetaDashboardPage } from './pages/BetaDashboardPage'
-import { LandingPage } from './pages/LandingPage'
-import { LeadDashboardPage } from './pages/LeadDashboardPage'
 import { BufferCallbackPage } from './pages/BufferCallbackPage'
-import { PixelTracker, trackPageView } from './components/PixelTracker'
 import { useAuth } from './hooks/useAuth'
-import { useEffect } from 'react'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth()
@@ -55,24 +53,10 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-// Track page views for advertising pixels (Step 5)
-function PageTracking() {
-  const location = useLocation()
-  useEffect(() => {
-    trackPageView(location.pathname, document.title)
-  }, [location.pathname])
-  return null
-}
-
 export default function App() {
   return (
     <>
-      <PixelTracker />
-      <PageTracking />
       <Routes>
-        {/* Public landing page (Step 2) — no auth required */}
-        <Route path="/" element={<LandingPage />} />
-
         {/* Public auth routes */}
         <Route path="/login" element={
           <PublicRoute>
@@ -82,6 +66,16 @@ export default function App() {
         <Route path="/register" element={
           <PublicRoute>
             <RegisterPage />
+          </PublicRoute>
+        } />
+        <Route path="/forgot-password" element={
+          <PublicRoute>
+            <ForgotPasswordPage />
+          </PublicRoute>
+        } />
+        <Route path="/reset-password" element={
+          <PublicRoute>
+            <ResetPasswordPage />
           </PublicRoute>
         } />
 
@@ -96,7 +90,6 @@ export default function App() {
         }>
           <Route index element={<DashboardPage />} />
           <Route path="dashboard" element={<DashboardPage />} />
-          <Route path="leads/dashboard" element={<LeadDashboardPage />} />
           <Route path="create/:type" element={<JobFormPage />} />
           <Route path="review/:jobId" element={<ReviewPage />} />
           <Route path="library" element={<LibraryPage />} />

@@ -1,12 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Body
-from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from uuid import UUID, uuid4
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from app.db.session import get_db
-from app.schemas.common import UserRegister, UserResponse, Token
+from app.schemas.common import (
+    UserRegister, UserResponse, Token, UserLogin,
+    ForgotPasswordRequest, ForgotPasswordResponse,
+    ResetPasswordRequest, ResetPasswordResponse,
+)
 from app.core.config import get_settings
 from app.core.security import create_access_token, create_refresh_token, verify_password, get_password_hash, decode_token
 from app.core.dependencies import get_current_user
@@ -14,6 +17,7 @@ from app.models.user import User
 from app.models.company import Company
 from app.models.brand_kit import BrandKit
 from app.models.quota import Quota
+from app.services.email import send_reset_code
 
 router = APIRouter()
 settings = get_settings()
@@ -79,19 +83,18 @@ async def register(user_data: UserRegister, db: AsyncSession = Depends(get_db)):
 
 @router.post("/login", response_model=Token)
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+    user_data: UserLogin = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
     """Login with email/password, return JWT tokens."""
     # Find user by email
-    result = await db.execute(select(User).where(User.email == form_data.username))
+    result = await db.execute(select(User).where(User.email == user_data.email))
     user = result.scalar_one_or_none()
     
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    if not user or not verify_password(user_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
         )
     
     if not user.is_active:
@@ -155,28 +158,66 @@ async def logout():
     return {"message": "Logged out successfully"}
 
 
-@router.post("/forgot-password")
-async def forgot_password(email: str = Body(..., embed=True), db: AsyncSession = Depends(get_db)):
-    """Request password reset (placeholder - implement email sending in production)."""
-    # In production, send reset email with token
-    # For now, just check if user exists
-    result = await db.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
-    
-    # Always return success to prevent email enumeration
-    return {"message": "If the email exists, a password reset link has been sent"}
-
-
-@router.post("/reset-password")
-async def reset_password(
-    token: str = Body(..., embed=True),
-    new_password: str = Body(..., embed=True),
+@router.post("/forgot-password", response_model=ForgotPasswordResponse)
+async def forgot_password(
+    request: ForgotPasswordRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Reset password with token (placeholder - implement token validation in production)."""
-    # In production, validate reset token and update password
-    # For now, return not implemented
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Password reset not yet implemented",
+    """Request a password reset code sent to the user's email."""
+    result = await db.execute(select(User).where(User.email == request.email))
+    user = result.scalar_one_or_none()
+
+    # Always return success to prevent email enumeration
+    if not user:
+        return ForgotPasswordResponse(
+            message="If the email exists, a password reset code has been sent"
+        )
+
+    # Generate 6-digit code and store with expiry
+    import random
+
+    code = f"{random.randint(100000, 999999)}"
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.EMAIL_RESET_CODE_EXPIRE_MINUTES
     )
+
+    user.password_reset_code = code
+    user.password_reset_expires = expires_at
+    await db.commit()
+
+    # Send the code via email (dev mode logs to console + file)
+    await send_reset_code(request.email, code)
+
+    return ForgotPasswordResponse(
+        message="If the email exists, a password reset code has been sent"
+    )
+
+
+@router.post("/reset-password", response_model=ResetPasswordResponse)
+async def reset_password(
+    request: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Reset password using a valid reset code."""
+    result = await db.execute(select(User).where(User.password_reset_code == request.code))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset code",
+        )
+
+    if not user.password_reset_expires or user.password_reset_expires < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reset code has expired",
+        )
+
+    # Update password and clear reset code
+    user.hashed_password = get_password_hash(request.new_password)
+    user.password_reset_code = None
+    user.password_reset_expires = None
+    await db.commit()
+
+    return ResetPasswordResponse(message="Password reset successfully")

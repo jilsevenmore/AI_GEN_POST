@@ -53,7 +53,7 @@ export function LegalPage() {
 
   if (isLoading) {
     return (
-      <div className="max-w-3xl mx-auto py-12 text-center">
+      <div className="w-full max-w-5xl mx-auto py-12 text-center">
         <div className="animate-spin rounded-full h-12 w-12 border-4 border-primary-600 border-t-transparent mx-auto" />
         <p className="mt-4 text-gray-500">Loading...</p>
       </div>
@@ -62,7 +62,7 @@ export function LegalPage() {
 
   if (error) {
     return (
-      <div className="max-w-3xl mx-auto py-12 text-center">
+      <div className="w-full max-w-5xl mx-auto py-12 text-center">
         <FileText className="h-12 w-12 text-gray-300 mx-auto mb-4" />
         <h2 className="text-lg font-medium text-gray-900">Failed to load</h2>
         <button onClick={() => navigate('/dashboard')} className="mt-4 btn-primary">
@@ -78,7 +78,7 @@ export function LegalPage() {
   // ...
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className="w-full max-w-5xl mx-auto space-y-6 pb-12">
       <SEO
         title={title}
         description={page === 'privacy' ? 'Read the EVENMORE INFOTECH privacy policy.' : 'Read the EVENMORE INFOTECH terms of service.'}
