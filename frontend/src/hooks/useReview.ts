@@ -1,5 +1,7 @@
+import { useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { reviewApi, jobsApi } from '../api/services'
+import { getAccessToken } from '../api/utils/tokens'
 import type { ReviewResponse, RegenerateRequest, ApproveRequest, ContentResponse, Platform, JobResponse, JobStatus } from '../api/types'
 
 const ACTIVE_STATUSES: JobStatus[] = [
@@ -8,7 +10,9 @@ const ACTIVE_STATUSES: JobStatus[] = [
 ]
 
 export function useReview(jobId: string | null) {
-  // First, poll the job status to know when generation is complete
+  const queryClient = useQueryClient()
+
+  // Fetch initial job state once; live progress arrives over WebSocket instead of REST polling
   const { data: job, isLoading: jobLoading, error: jobError, refetch: refetchJob } = useQuery({
     queryKey: ['job', jobId],
     queryFn: () => {
@@ -16,16 +20,48 @@ export function useReview(jobId: string | null) {
       return jobsApi.get(jobId)
     },
     enabled: !!jobId,
-    refetchInterval: (query) => {
-      const jobData = query.state.data?.data
-      if (!jobData) return 2000
-      return ACTIVE_STATUSES.includes(jobData.status) ? 2000 : false
-    },
+    refetchInterval: false,
     staleTime: 0,
   })
 
-  // Only fetch review content when job is awaiting_review (generation complete)
   const jobData = job?.data
+  const isGenerating = jobData ? ACTIVE_STATUSES.includes(jobData.status) : true
+
+  useEffect(() => {
+    if (!jobId || !isGenerating) return
+    const token = getAccessToken()
+    if (!token) return
+
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${wsProtocol}//${window.location.host}/api/v1/jobs/${jobId}/ws?token=${encodeURIComponent(token)}`
+    const ws = new WebSocket(wsUrl)
+
+    ws.onmessage = (event) => {
+      try {
+        const update = JSON.parse(event.data) as Partial<JobResponse>
+        queryClient.setQueryData(['job', jobId], (old: { data: JobResponse } | undefined) => {
+          if (!old?.data) {
+            return { data: update as JobResponse }
+          }
+          return {
+            ...old,
+            data: {
+              ...old.data,
+              ...update,
+            },
+          }
+        })
+      } catch {
+        // Ignore malformed WebSocket frames
+      }
+    }
+
+    return () => {
+      ws.close()
+    }
+  }, [jobId, isGenerating, queryClient])
+
+  // Only fetch review content when job is awaiting_review (generation complete)
   const isGenerationComplete = jobData && jobData.status === 'awaiting_review'
   const isGenerationFailed = jobData && jobData.status === 'failed'
 

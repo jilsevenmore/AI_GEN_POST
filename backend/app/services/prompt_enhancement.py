@@ -3,11 +3,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from openai import AsyncOpenAI
 
 from app.core.config import get_settings
+from app.core.logging import (
+    log_llm_call,
+    log_llm_error,
+    log_llm_fallback,
+    log_llm_response,
+)
+from app.services.security import sanitize_for_logging
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +23,15 @@ MAX_PROMPT_ENHANCE_INPUT_CHARS = 6000
 
 # Timeout per provider call so a dead local Ollama instance doesn't hang generation
 PROMPT_ENHANCE_TIMEOUT_SECONDS = 15
+
+
+def _llm_fields(provider: str, model: str, prompt: str) -> dict[str, object]:
+    return {
+        "provider": provider,
+        "model": model,
+        "prompt": sanitize_for_logging(prompt, max_length=2000),
+        "prompt_chars": len(prompt),
+    }
 
 
 def _truncate_for_enhancement(text: str, max_chars: int = MAX_PROMPT_ENHANCE_INPUT_CHARS) -> str:
@@ -39,11 +56,14 @@ async def enhance_prompt(user_prompt: str, purpose: str = "image generation prom
 
     # Primary option A: Local Ollama (free, offline after model download)
     if settings.OLLAMA_PROMPT_ENHANCE_ENABLED and settings.OLLAMA_MODEL:
+        ollama_model = settings.OLLAMA_MODEL
+        start = time.perf_counter()
+        log_llm_call("ollama", ollama_model, prompt=prompt)
         try:
             client = AsyncOpenAI(api_key="ollama", base_url=settings.OLLAMA_BASE_URL)
             resp = await asyncio.wait_for(
                 client.chat.completions.create(
-                    model=settings.OLLAMA_MODEL,
+                    model=ollama_model,
                     messages=[
                         {"role": "system", "content": system},
                         {"role": "user", "content": prompt},
@@ -54,8 +74,20 @@ async def enhance_prompt(user_prompt: str, purpose: str = "image generation prom
             )
             content = (resp.choices[0].message.content or "").strip()
             if content:
+                log_llm_response(
+                    "ollama",
+                    ollama_model,
+                    response=content,
+                    latency_ms=(time.perf_counter() - start) * 1000,
+                )
                 return content
         except Exception as e:
+            log_llm_error(
+                "ollama",
+                ollama_model,
+                e,
+                latency_ms=(time.perf_counter() - start) * 1000,
+            )
             logger.warning("Ollama prompt enhancement failed, trying next provider: %s", e)
 
     # Primary option B: MiniMax via Hugging Face Inference Providers (OpenAI-compatible router)
@@ -64,6 +96,9 @@ async def enhance_prompt(user_prompt: str, purpose: str = "image generation prom
         hf_base_url = settings.MINIMAX_BASE_URL or settings.HF_BASE_URL or "https://router.huggingface.co/v1"
         hf_model = settings.MINIMAX_MODEL or settings.HF_PROMPT_MODEL or "MiniMaxAI/MiniMax-M2.7"
         if hf_token:
+            log_llm_fallback("ollama", "huggingface", "ollama unavailable or disabled")
+            start = time.perf_counter()
+            log_llm_call("huggingface", hf_model, prompt=prompt)
             try:
                 client = AsyncOpenAI(api_key=hf_token, base_url=hf_base_url)
                 resp = await asyncio.wait_for(
@@ -79,17 +114,33 @@ async def enhance_prompt(user_prompt: str, purpose: str = "image generation prom
                 )
                 content = (resp.choices[0].message.content or "").strip()
                 if content:
+                    log_llm_response(
+                        "huggingface",
+                        hf_model,
+                        response=content,
+                        latency_ms=(time.perf_counter() - start) * 1000,
+                    )
                     return content
             except Exception as e:
+                log_llm_error(
+                    "huggingface",
+                    hf_model,
+                    e,
+                    latency_ms=(time.perf_counter() - start) * 1000,
+                )
                 logger.warning("MiniMax (Hugging Face) prompt enhancement failed, falling back to GPT-4o mini: %s", e)
 
     # Fallback: GPT-4o mini
     if settings.OPENAI_API_KEY:
+        openai_model = settings.OPENAI_MODEL or "gpt-4o-mini"
+        log_llm_fallback("huggingface", "openai", "hugging face unavailable or disabled")
+        start = time.perf_counter()
+        log_llm_call("openai", openai_model, prompt=prompt)
         try:
             client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
             resp = await asyncio.wait_for(
                 client.chat.completions.create(
-                    model=settings.OPENAI_MODEL or "gpt-4o-mini",
+                    model=openai_model,
                     messages=[
                         {"role": "system", "content": system},
                         {"role": "user", "content": prompt},
@@ -100,8 +151,20 @@ async def enhance_prompt(user_prompt: str, purpose: str = "image generation prom
             )
             content = (resp.choices[0].message.content or "").strip()
             if content:
+                log_llm_response(
+                    "openai",
+                    openai_model,
+                    response=content,
+                    latency_ms=(time.perf_counter() - start) * 1000,
+                )
                 return content
         except Exception as e:
+            log_llm_error(
+                "openai",
+                openai_model,
+                e,
+                latency_ms=(time.perf_counter() - start) * 1000,
+            )
             logger.warning("GPT-4o mini prompt enhancement fallback failed: %s", e)
 
     return prompt

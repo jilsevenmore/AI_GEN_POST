@@ -220,6 +220,8 @@ async def run_generation_job(
         
         state = initial_state
 
+        from app.services.job_events import publish_job_event
+
         async def _update_progress(step: str, progress: int, status: str = "pending"):
             try:
                 await db.execute(
@@ -233,6 +235,16 @@ async def run_generation_job(
                     )
                 )
                 await db.commit()
+                publish_job_event(
+                    str(job_id),
+                    {
+                        "id": str(job_id),
+                        "status": status,
+                        "progress": progress,
+                        "current_step": step,
+                        "error": None,
+                    },
+                )
             except Exception as e:
                 logger.warning(f"Failed to update job progress for {job_id}: {e}")
                 await db.rollback()
@@ -290,6 +302,16 @@ async def run_generation_job(
                 )
             )
             await db.commit()
+            publish_job_event(
+                str(job_id),
+                {
+                    "id": str(job_id),
+                    "status": "failed",
+                    "progress": 0,
+                    "current_step": "Failed",
+                    "error": str(e),
+                },
+            )
             return None
 
 
@@ -350,8 +372,19 @@ async def _save_results(state: GenerationState, db, company_id) -> None:
     
     # Save library images (if any approved later)
     # This happens on approve, not here
-    
+
     await db.commit()
+    from app.services.job_events import publish_job_event
+    publish_job_event(
+        str(state.job_input.job_id),
+        {
+            "id": str(state.job_input.job_id),
+            "status": "awaiting_review",
+            "progress": 100,
+            "current_step": "Ready for review",
+            "error": state.error,
+        },
+    )
 
 
 async def _save_error(state: GenerationState, db) -> None:
@@ -372,6 +405,17 @@ async def _save_error(state: GenerationState, db) -> None:
         )
     )
     await db.commit()
+    from app.services.job_events import publish_job_event
+    publish_job_event(
+        str(state.job_input.job_id),
+        {
+            "id": str(state.job_input.job_id),
+            "status": "failed",
+            "progress": 0,
+            "current_step": "Failed",
+            "error": state.error,
+        },
+    )
 
 
 async def resume_after_review(
@@ -383,24 +427,23 @@ async def resume_after_review(
     db,
 ) -> GenerationState:
     """Resume generation after human review with regeneration feedback."""
+    from uuid import UUID
+    from sqlalchemy import select
     from app.db.session import AsyncSessionLocal
+    from app.models.job import Job
 
-    graph = get_generation_graph()
-    
-    # Get current state from checkpoint
-    config = {"configurable": {"thread_id": job_id}}
-    current_state_dict = await graph.aget_state(config)
-    
-    if not current_state_dict:
-        raise ValueError("No saved state found for job")
-    
-    state = GenerationState.model_validate(current_state_dict.values)
-    
+    job_uuid = UUID(str(job_id))
+    result = await db.execute(select(Job).where(Job.id == job_uuid))
+    db_job = result.scalar_one_or_none()
+
+    if not db_job:
+        raise ValueError(f"Job {job_id} not found")
+
     # Re-run the generation from the original job input, carrying the
     # review feedback into the new state so nodes can act on it.
     return await run_generation_job(
-        str(state.job_input.job_id),
-        str(state.job_input.company_id),
+        str(db_job.id),
+        str(db_job.company_id),
         AsyncSessionLocal,
         user_feedback=feedback,
         regenerate_text=regenerate_text,

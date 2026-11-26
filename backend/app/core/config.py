@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
@@ -101,6 +102,10 @@ class Settings(BaseSettings):
     LANGSMITH_PROJECT: str = "ai-gen-post"
     LANGSMITH_TRACING: bool = True
 
+    # LangChain tracing env vars (LangChain auto-detects LANGCHAIN_* env vars)
+    LANGCHAIN_TRACING_V2: bool = True
+    LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
+
     # Quotas
     DAILY_FREE_REQUESTS_PER_USER: int = 12
     DAILY_SPEND_CAP_USD: float = 10.0
@@ -114,6 +119,7 @@ class Settings(BaseSettings):
     ENABLE_BRAND_KIT: bool = True
     ENABLE_BUFFER_PUBLISHING: bool = True
     ENABLE_FREE_MODELS_FIRST: bool = True
+    ENABLE_SAFETY_CHECK: bool = False
 
     # Email (Password Reset) - Free mailer compatible
     # Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS in .env to send real emails.
@@ -125,6 +131,30 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: str = "noreply@aigenpost.local"
     SMTP_FROM_NAME: str = "AI Gen Post"
     EMAIL_RESET_CODE_EXPIRE_MINUTES: int = 15
+
+    # Logging (structured JSON; set LOG_JSON=false for plain text)
+    LOG_LEVEL: str = "INFO"
+    LOG_DIR: str = "logs"
+    LOG_TO_FILE: bool = True
+    LOG_JSON: bool = True
+    LOG_ROTATION_MAX_BYTES: int = 10 * 1024 * 1024
+    LOG_ROTATION_BACKUP_COUNT: int = 5
+
+
+def init_langsmith() -> None:
+    """Configure LangChain/LangSmith tracing from settings.
+
+    LangChain auto-detects LANGCHAIN_* environment variables, so we map our
+    Pydantic settings to os.environ before any LLM is instantiated. Call this
+    at app startup (and before model router creation) so every prompt is traced.
+    """
+    settings = get_settings()
+
+    if settings.LANGSMITH_TRACING and settings.LANGSMITH_API_KEY:
+        os.environ["LANGCHAIN_TRACING_V2"] = str(settings.LANGCHAIN_TRACING_V2).lower()
+        os.environ["LANGCHAIN_API_KEY"] = settings.LANGSMITH_API_KEY
+        os.environ["LANGCHAIN_PROJECT"] = settings.LANGSMITH_PROJECT
+        os.environ["LANGCHAIN_ENDPOINT"] = settings.LANGCHAIN_ENDPOINT
 
 
 @lru_cache

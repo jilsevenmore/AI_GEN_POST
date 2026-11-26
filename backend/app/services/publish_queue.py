@@ -12,6 +12,7 @@ import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, and_
 
+from app.core.config import get_settings
 from app.db.session import AsyncSessionLocal
 from app.models.publish import PublishAttempt
 from app.models.channel import ChannelConnection
@@ -97,7 +98,7 @@ class PublishingQueue:
     RATE_LIMIT_WINDOW = 900  # seconds
     
     def __init__(self, redis_url: str = None):
-        self.redis_url = redis_url or "redis://localhost:6379/0"
+        self.redis_url = redis_url or get_settings().REDIS_URL
         self._redis: Optional[redis.Redis] = None
         self._publisher = get_publisher()
         self._worker_task: Optional[asyncio.Task] = None
@@ -129,7 +130,7 @@ class PublishingQueue:
             except asyncio.CancelledError:
                 pass
         if self._redis:
-            await self._redis.close()
+            await self._redis.aclose()
         logger.info("Publishing queue disconnected")
     
     def _get_idempotency_key(self, idempotency_key: str) -> str:
@@ -175,15 +176,17 @@ class PublishingQueue:
         content: Content,
         text: str,
         image_url: Optional[str] = None,
+        force: bool = False,
     ) -> bool:
         """Add a publish job to the queue."""
         await self._ensure_connected()
 
-        # Check idempotency
-        existing_id = await self.check_idempotency(attempt.idempotency_key)
-        if existing_id:
-            logger.info("Duplicate publish attempt detected key=%s existing_attempt_id=%s", attempt.idempotency_key, existing_id)
-            return False
+        # Check idempotency unless explicitly bypassed for a manual retry
+        if not force:
+            existing_id = await self.check_idempotency(attempt.idempotency_key)
+            if existing_id:
+                logger.info("Duplicate publish attempt detected key=%s existing_attempt_id=%s", attempt.idempotency_key, existing_id)
+                return False
 
         # Create job
         job = PublishJob(
@@ -201,14 +204,12 @@ class PublishingQueue:
         # Set idempotency key
         await self.set_idempotency(attempt.idempotency_key, attempt.id)
 
-        if attempt.scheduled_at and attempt.scheduled_at > datetime.now(timezone.utc):
-            # Schedule for later - add to scheduled queue with score = timestamp
-            score = attempt.scheduled_at.timestamp()
-            await self._redis.zadd(self.SCHEDULED_QUEUE, {job.to_json(): score})
-            logger.info("Queued scheduled publish attempt_id=%s schedule_at=%s channel_id=%s", attempt.id, attempt.scheduled_at, attempt.channel_id)
+        # Dispatch immediately so scheduled posts are handed off to Buffer
+        # (mode: customScheduled) while schedule_at is still in the future.
+        await self._redis.lpush(self.QUEUE_NAME, job.to_json())
+        if attempt.scheduled_at:
+            logger.info("Queued scheduled publish for immediate Buffer handoff attempt_id=%s schedule_at=%s channel_id=%s", attempt.id, attempt.scheduled_at, attempt.channel_id)
         else:
-            # Add to immediate queue
-            await self._redis.lpush(self.QUEUE_NAME, job.to_json())
             logger.info("Queued immediate publish attempt_id=%s channel_id=%s platform=%s", attempt.id, attempt.channel_id, channel.platform)
 
         return True
@@ -242,16 +243,33 @@ class PublishingQueue:
             logger.info(f"Moved {len(due_jobs)} scheduled jobs to queue")
     
     async def requeue(self, job: PublishJob, delay: float = 0) -> None:
-        """Requeue a job for retry."""
+        """Requeue a job for retry without mutating its target schedule_at."""
         job.retry_count += 1
         if delay > 0:
-            # Schedule for later
-            schedule_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-            job.schedule_at = schedule_at
-            score = schedule_at.timestamp()
-            await self._redis.zadd(self.SCHEDULED_QUEUE, {job.to_json(): score})
+            retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            await self._redis.zadd(self.SCHEDULED_QUEUE, {job.to_json(): retry_at.timestamp()})
         else:
             await self._redis.lpush(self.QUEUE_NAME, job.to_json())
+
+    async def is_attempt_queued(self, attempt_id: UUID) -> bool:
+        """Return True if attempt_id is currently processing, queued, or scheduled for retry."""
+        await self._ensure_connected()
+        target = str(attempt_id)
+        if await self._redis.sismember(self.PROCESSING_SET, target):
+            return True
+        for raw in await self._redis.lrange(self.QUEUE_NAME, 0, -1):
+            try:
+                if str(PublishJob.from_json(raw).attempt_id) == target:
+                    return True
+            except Exception:
+                continue
+        for raw in await self._redis.zrange(self.SCHEDULED_QUEUE, 0, -1):
+            try:
+                if str(PublishJob.from_json(raw).attempt_id) == target:
+                    return True
+            except Exception:
+                continue
+        return False
     
     async def move_to_dead_letter(self, job: PublishJob, error: str) -> None:
         """Move job to dead letter queue."""
@@ -334,13 +352,21 @@ class PublishingQueue:
             # Wait for rate limit
             await self.wait_for_rate_limit()
 
+            # If a scheduled time already elapsed (e.g., during retry backoff or manual retry),
+            # publish immediately so Buffer does not reject a past dueAt.
+            effective_schedule_at = (
+                job.schedule_at
+                if job.schedule_at and job.schedule_at > datetime.now(timezone.utc)
+                else None
+            )
+
             # Publish
             result = await self._publisher.publish(
                 channel=channel,
                 content=content,
                 image_url=job.image_url,
                 text=job.text,
-                schedule_at=job.schedule_at,
+                schedule_at=effective_schedule_at,
             )
 
             async with AsyncSessionLocal() as db:
@@ -421,7 +447,9 @@ class PublishingQueue:
                 await asyncio.sleep(poll_interval)
     
     def start_worker_task(self, poll_interval: float = 2.0) -> asyncio.Task:
-        """Start worker as asyncio task."""
+        """Start worker as asyncio task if not already running."""
+        if self._worker_task and not self._worker_task.done():
+            return self._worker_task
         self._worker_task = asyncio.create_task(self.start_worker(poll_interval))
         return self._worker_task
     

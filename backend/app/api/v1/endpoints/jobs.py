@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query, UploadFile, File, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
@@ -379,3 +379,93 @@ async def simulate_job_progress(
     await db.refresh(job)
     
     return JobResponse.model_validate(job)
+
+
+_ACTIVE_WS_STATUSES = {
+    "pending",
+    "expanding_prompt",
+    "writing_text",
+    "generating_image",
+    "safety_check",
+    "adapting",
+    "regenerating",
+}
+
+
+@router.websocket("/{job_id}/ws")
+async def job_progress_ws(
+    websocket: WebSocket,
+    job_id: UUID,
+    token: Optional[str] = Query(default=None),
+):
+    """Stream real-time job progress updates over a single WebSocket connection."""
+    import asyncio
+    from jose import JWTError
+    from app.core.security import decode_token
+    from app.db.session import AsyncSessionLocal
+    from app.services.job_events import subscribe_job, unsubscribe_job
+
+    if not token:
+        await websocket.close(code=4401)
+        return
+
+    try:
+        payload = decode_token(token)
+        user_id = payload.get("sub")
+        company_id = payload.get("company_id")
+        token_type = payload.get("type")
+        if not user_id or not company_id or token_type != "access":
+            await websocket.close(code=4401)
+            return
+        company_uuid = UUID(company_id)
+    except (JWTError, ValueError):
+        await websocket.close(code=4401)
+        return
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Job).where(Job.id == job_id, Job.company_id == company_uuid)
+        )
+        job = result.scalar_one_or_none()
+        if not job:
+            await websocket.close(code=4404)
+            return
+        initial_payload = JobResponse.model_validate(job).model_dump(mode="json")
+
+    await websocket.accept()
+    await websocket.send_json(initial_payload)
+
+    initial_status = getattr(initial_payload.get("status"), "value", initial_payload.get("status"))
+    if initial_status not in _ACTIVE_WS_STATUSES:
+        await websocket.close(code=1000)
+        return
+
+    queue = subscribe_job(str(job_id))
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                await websocket.send_json(event)
+                ev_status = getattr(event.get("status"), "value", event.get("status"))
+                if ev_status not in _ACTIVE_WS_STATUSES:
+                    await websocket.close(code=1000)
+                    break
+            except asyncio.TimeoutError:
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(
+                        select(Job).where(Job.id == job_id, Job.company_id == company_uuid)
+                    )
+                    job = result.scalar_one_or_none()
+                    if not job:
+                        await websocket.close(code=4404)
+                        break
+                    snapshot = JobResponse.model_validate(job).model_dump(mode="json")
+                    await websocket.send_json(snapshot)
+                    snap_status = getattr(snapshot.get("status"), "value", snapshot.get("status"))
+                    if snap_status not in _ACTIVE_WS_STATUSES:
+                        await websocket.close(code=1000)
+                        break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        unsubscribe_job(str(job_id), queue)

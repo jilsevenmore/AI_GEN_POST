@@ -77,7 +77,13 @@ async def _enqueue_publish_attempts(
 
         # Enqueue
         try:
-            await queue.enqueue(attempt, channel, content, text, image_url)
+            enqueued = await queue.enqueue(attempt, channel, content, text, image_url)
+            if not enqueued:
+                logger.warning("Skipped duplicate publish attempt attempt_id=%s channel_id=%s", attempt.id, channel.id)
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Duplicate publish attempt already queued",
+                )
             logger.info("Enqueued publish attempt attempt_id=%s channel_id=%s", attempt.id, channel.id)
         except RuntimeError:
             logger.exception("Failed to enqueue publish attempt attempt_id=%s (Redis unavailable)", attempt.id)
@@ -306,6 +312,33 @@ async def _validate_publish_request(
         )
         raise HTTPException(status_code=404, detail="One or more channels not found or inactive")
 
+    # Prevent duplicate publishing to channels that already have a sent or active attempt
+    existing_result = await db.execute(
+        select(PublishAttempt).where(
+            PublishAttempt.content_id == content.id,
+            PublishAttempt.channel_id.in_([c.id for c in channels]),
+            PublishAttempt.status.in_([
+                PublishStatus.pending,
+                PublishStatus.retrying,
+                PublishStatus.sent,
+            ]),
+        )
+    )
+    existing_attempts = existing_result.scalars().all()
+    if existing_attempts:
+        locked_ids = {a.channel_id for a in existing_attempts}
+        locked_names = [c.account_name for c in channels if c.id in locked_ids]
+        logger.warning(
+            "Duplicate publish rejected company_id=%s content_id=%s channels=%s",
+            current_company.id,
+            content.id,
+            locked_names,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Content is already published or queued for: {', '.join(locked_names)}",
+        )
+
     return content, channels
 
 
@@ -437,11 +470,20 @@ async def _publish_immediate(
             )
             await persist_refreshed_channel_tokens(db, channel, previous_access_token_encrypted)
             if channel.access_token_encrypted != previous_access_token_encrypted:
+                try:
+                    prev_plain = publisher._decrypt(previous_access_token_encrypted)
+                except Exception:
+                    prev_plain = None
                 for sibling in channels:
-                    if (
-                        sibling.id != channel.id
-                        and sibling.access_token_encrypted == previous_access_token_encrypted
-                    ):
+                    if sibling.id == channel.id:
+                        continue
+                    same_token = sibling.access_token_encrypted == previous_access_token_encrypted
+                    if not same_token and prev_plain:
+                        try:
+                            same_token = publisher._decrypt(sibling.access_token_encrypted) == prev_plain
+                        except Exception:
+                            same_token = False
+                    if same_token:
                         sibling.access_token_encrypted = channel.access_token_encrypted
                         sibling.refresh_token_encrypted = channel.refresh_token_encrypted
                         sibling.token_expires_at = channel.token_expires_at
@@ -531,18 +573,19 @@ async def retry_publish(
         logger.warning("Retry rejected: invalid status company_id=%s attempt_id=%s status=%s", current_company.id, attempt_id, attempt.status)
         raise HTTPException(status_code=400, detail="Can only retry failed or retrying attempts")
 
-    # Reset for retry
-    attempt.status = PublishStatus.retrying
-    attempt.retry_count += 1
-    attempt.updated_at = datetime.now(timezone.utc)
-    attempt.error = None
-    await db.commit()
-    await db.refresh(attempt)
-    logger.info("Retry attempt reset company_id=%s attempt_id=%s retry_count=%s", current_company.id, attempt_id, attempt.retry_count)
-
-    # Re-queue
     publisher = get_publisher()
     queue = get_publishing_queue()
+
+    try:
+        if await queue.is_attempt_queued(attempt.id):
+            logger.warning("Retry rejected: attempt already queued company_id=%s attempt_id=%s", current_company.id, attempt_id)
+            raise HTTPException(status_code=409, detail="Publish attempt is already queued or processing")
+    except RuntimeError:
+        logger.exception("Retry failed: queue unavailable company_id=%s attempt_id=%s", current_company.id, attempt_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Publishing queue is unavailable (Redis is not running)",
+        )
 
     channel = await db.get(ChannelConnectionModel, attempt.channel_id)
     content = await db.get(Content, attempt.content_id)
@@ -554,6 +597,7 @@ async def retry_publish(
         )
         attempt.status = PublishStatus.failed
         attempt.error = "Channel or content no longer available"
+        await sync_job_publish_status(db, attempt.content_id)
         await db.commit()
         await db.refresh(attempt)
         return PublishAttemptResponse.model_validate(attempt)
@@ -562,20 +606,32 @@ async def retry_publish(
     text = publisher._truncate_text(text, channel.platform)
     image_url = publisher._select_best_image(content, channel.platform)
 
+    # Rotate idempotency key and force enqueue before updating DB status to retrying
+    attempt.idempotency_key = f"publish_{attempt.content_id}_{attempt.channel_id}_{uuid4().hex[:8]}"
+    attempt.retry_count += 1
+
     try:
-        await queue.enqueue(attempt, channel, content, text, image_url)
-        queue.start_worker_task()
-        logger.info("Retry attempt re-enqueued company_id=%s attempt_id=%s channel_id=%s", current_company.id, attempt_id, channel.id)
+        enqueued = await queue.enqueue(attempt, channel, content, text, image_url, force=True)
+        if not enqueued:
+            raise RuntimeError("Queue rejected retry enqueue")
     except RuntimeError:
         logger.exception("Retry failed: queue unavailable company_id=%s attempt_id=%s", current_company.id, attempt_id)
-        attempt.status = PublishStatus.failed
-        attempt.error = "Publishing queue is unavailable (Redis is not running)"
-        await db.commit()
-        await db.refresh(attempt)
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Publishing queue is unavailable (Redis is not running)",
         )
+
+    attempt.status = PublishStatus.retrying
+    attempt.updated_at = datetime.now(timezone.utc)
+    attempt.error = None
+    await db.flush()
+    await sync_job_publish_status(db, attempt.content_id)
+    await db.commit()
+    await db.refresh(attempt)
+
+    queue.start_worker_task()
+    logger.info("Retry attempt re-enqueued company_id=%s attempt_id=%s channel_id=%s retry_count=%s", current_company.id, attempt_id, channel.id, attempt.retry_count)
 
     return PublishAttemptResponse.model_validate(attempt)
 

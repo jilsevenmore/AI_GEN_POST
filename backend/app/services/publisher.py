@@ -5,6 +5,7 @@ import base64
 import hashlib
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from uuid import UUID
@@ -503,15 +504,27 @@ class BufferPublisher(Publisher):
         return content.image_variants[0]["url"]
     
     def _get_platform_text(self, content: Content, platform: Any) -> str:
-        """Get platform-specific text."""
+        """Get platform-specific text, appending only non-duplicate hashtags."""
         platform_key = getattr(platform, "value", str(platform)).lower()
         for pc in (content.platform_contents or []):
             pc_platform = getattr(pc.get("platform"), "value", str(pc.get("platform", ""))).lower()
             if pc_platform == platform_key:
-                text = pc.get("text", "")
-                hashtags = pc.get("hashtags", [])
-                if hashtags:
-                    text += "\n\n" + " ".join(f"#{h}" for h in hashtags)
+                text = (pc.get("text") or "").rstrip()
+                hashtags = pc.get("hashtags") or []
+                existing_tags = {t.lower() for t in re.findall(r"#([A-Za-z0-9_]+)", text)}
+                tags_to_append: List[str] = []
+                for raw_tag in hashtags:
+                    clean = str(raw_tag).strip().lstrip("#")
+                    if not clean:
+                        continue
+                    key = clean.lower()
+                    if key in existing_tags:
+                        continue
+                    existing_tags.add(key)
+                    tags_to_append.append(f"#{clean}")
+                if tags_to_append:
+                    separator = "\n\n" if text else ""
+                    text = f"{text}{separator}{' '.join(tags_to_append)}"
                 return text
         
         # Fallback to long text
@@ -690,19 +703,46 @@ async def persist_refreshed_channel_tokens(
     channel: ChannelConnection,
     previous_access_token_encrypted: str,
 ) -> None:
-    """Persist refreshed Buffer tokens to the channel and any active sibling channels."""
+    """Persist refreshed Buffer tokens to the channel and any active sibling channels.
+
+    Note: Fernet encryption produces a different ciphertext each time the same
+    plaintext token is encrypted, so sibling matching must compare decrypted
+    tokens rather than raw ciphertext.
+    """
     if channel.access_token_encrypted == previous_access_token_encrypted:
         return
+
+    publisher = get_publisher()
+    try:
+        prev_plain = publisher._decrypt(previous_access_token_encrypted)
+    except Exception:
+        prev_plain = None
+
+    result = await db.execute(
+        select(ChannelConnection).where(
+            ChannelConnection.company_id == channel.company_id,
+            ChannelConnection.is_active == True,
+        )
+    )
+    matching_ids = []
+    for sibling in result.scalars().all():
+        if sibling.id == channel.id or sibling.access_token_encrypted == previous_access_token_encrypted:
+            matching_ids.append(sibling.id)
+            continue
+        if prev_plain:
+            try:
+                if publisher._decrypt(sibling.access_token_encrypted) == prev_plain:
+                    matching_ids.append(sibling.id)
+            except Exception:
+                pass
+
+    if not matching_ids:
+        matching_ids = [channel.id]
 
     now = datetime.now(timezone.utc)
     await db.execute(
         update(ChannelConnection)
-        .where(
-            ChannelConnection.company_id == channel.company_id,
-            ChannelConnection.is_active == True,
-            (ChannelConnection.id == channel.id)
-            | (ChannelConnection.access_token_encrypted == previous_access_token_encrypted),
-        )
+        .where(ChannelConnection.id.in_(matching_ids))
         .values(
             access_token_encrypted=channel.access_token_encrypted,
             refresh_token_encrypted=channel.refresh_token_encrypted,
@@ -711,9 +751,10 @@ async def persist_refreshed_channel_tokens(
         )
     )
     logger.info(
-        "Persisted refreshed Buffer tokens company_id=%s channel_id=%s",
+        "Persisted refreshed Buffer tokens company_id=%s channel_id=%s updated_count=%s",
         channel.company_id,
         channel.id,
+        len(matching_ids),
     )
 
 

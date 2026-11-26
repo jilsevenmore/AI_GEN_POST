@@ -3,8 +3,10 @@ import logging
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.services.ai.state import GenerationState
 from app.services.ai.router import get_model_router
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 SAFETY_CHECK_PROMPT = """You are a content safety moderator. Check the generated content for policy violations.
 
@@ -50,7 +52,16 @@ async def safety_check_node(state: GenerationState) -> GenerationState:
         state.current_step = "adapting"
         state.progress = 80
         return state
-    
+
+    # Safety check disabled via config — skip LLM moderation, allow content through
+    if not settings.ENABLE_SAFETY_CHECK:
+        state.safety_check_passed = True
+        state.safety_flags = []
+        state.current_step = "adapting"
+        state.progress = 80
+        logger.info(f"Safety check skipped for job {job.job_id} (ENABLE_SAFETY_CHECK=False)")
+        return state
+
     router = get_model_router()
     
     messages = [
@@ -70,10 +81,12 @@ async def safety_check_node(state: GenerationState) -> GenerationState:
         
         state.safety_check_passed = safety_data.get("passed", True)
         state.safety_flags = safety_data.get("flags", [])
-        
+
         if not state.safety_check_passed:
-            logger.warning(f"Safety check failed for job {job.job_id}: {state.safety_flags}")
-            state.error = f"Content flagged: {', '.join(state.safety_flags)}"
+            logger.warning(f"Safety check flagged content for job {job.job_id}: {state.safety_flags}")
+            # Record flags but do NOT fail generation — content proceeds to review
+            # so the user can edit and publish manually.
+            state.error = None
         
     except Exception as e:
         logger.error(f"Safety check failed: {e}")

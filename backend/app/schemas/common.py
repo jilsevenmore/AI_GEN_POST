@@ -145,8 +145,8 @@ class BrandKitResponse(BrandKitBase, IDMixin, TimestampMixin):
 
 class JobCreate(BaseModel):
     type: JobType
-    title: str = Field(..., min_length=1, max_length=200)
-    topic: str = Field(..., min_length=1, max_length=500)
+    title: str = Field(..., min_length=1, max_length=1000)
+    topic: str = Field(..., min_length=1, max_length=2000)
     tone: Optional[str] = None
     audience: Optional[str] = None
     keywords: List[str] = Field(default_factory=list)
@@ -276,7 +276,7 @@ class ApproveRequest(BaseModel):
     edited_text: Optional[Dict[Platform, str]] = None  # Platform -> edited text
     schedule_at: Optional[datetime] = None  # If None, publish now
     channel_ids: Optional[List[UUID]] = None  # If provided, publish only to these channels
-    auto_publish: bool = True  # If True, enqueue publishing after approval
+    auto_publish: bool = False  # If True, enqueue publishing after approval (opt-in)
 
 
 class ReviewResponse(BaseModel):

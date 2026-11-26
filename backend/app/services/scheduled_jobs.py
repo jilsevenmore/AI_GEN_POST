@@ -82,6 +82,53 @@ async def cleanup_old_publish_attempts(retention_days: int = 90) -> dict:
         return {"attempts_cleaned": count}
 
 
+async def recover_stale_publish_attempts(stale_minutes: int = 15) -> dict:
+    """Mark pending/retrying publish attempts as failed if missing from Redis queue."""
+    from app.services.publish_queue import get_publishing_queue
+    from app.services.publisher import sync_job_publish_status
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=stale_minutes)
+    queue = get_publishing_queue()
+
+    try:
+        await queue._ensure_connected()
+    except RuntimeError:
+        logger.warning("Skipping stale publish attempt recovery: Redis is not connected")
+        return {"recovered": 0, "skipped": True}
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(PublishAttempt).where(
+                PublishAttempt.status.in_(["pending", "retrying"]),
+                PublishAttempt.updated_at < cutoff,
+            )
+        )
+        candidates = result.scalars().all()
+        if not candidates:
+            return {"recovered": 0}
+
+        recovered = 0
+        affected_content_ids = set()
+        for attempt in candidates:
+            if await queue.is_attempt_queued(attempt.id):
+                continue
+            attempt.status = "failed"
+            attempt.error = attempt.error or "Publish job stalled or missing from queue; please retry."
+            attempt.updated_at = now
+            affected_content_ids.add(attempt.content_id)
+            recovered += 1
+
+        if recovered:
+            await db.flush()
+            for content_id in affected_content_ids:
+                await sync_job_publish_status(db, content_id)
+            await db.commit()
+            logger.warning("Recovered %d stale publish attempts missing from queue", recovered)
+
+        return {"recovered": recovered}
+
+
 async def generate_missing_search_vectors(batch_size: int = 100) -> dict:
     """Generate search vectors for images that don't have them."""
     logger.info("Starting search vector generation")

@@ -77,7 +77,7 @@ async def regenerate_content(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    if job.status not in [JobStatus.awaiting_review, JobStatus.regenerating]:
+    if job.status not in [JobStatus.awaiting_review, JobStatus.regenerating, JobStatus.failed]:
         raise HTTPException(status_code=400, detail="Job not in a state that allows regeneration")
     
     # Check regeneration limit
@@ -101,6 +101,8 @@ async def regenerate_content(
             new_reference_ids=request.reference_image_ids,
             db=db,
         )
+        if final_state is None:
+            raise RuntimeError("Generation failed during regeneration")
         
         # Get updated content
         content_result = await db.execute(
@@ -286,7 +288,22 @@ async def approve_content(
     await db.commit()
     await db.refresh(content)
 
-    # Enqueue publish attempts after approval is saved
+    # Enqueue publish attempts after approval is saved (skip channels already queued/sent)
+    if channels_to_publish:
+        existing_attempts_res = await db.execute(
+            select(PublishAttempt.channel_id).where(
+                PublishAttempt.content_id == content.id,
+                PublishAttempt.channel_id.in_([c.id for c in channels_to_publish]),
+                PublishAttempt.status.in_([
+                    PublishStatus.pending,
+                    PublishStatus.retrying,
+                    PublishStatus.sent,
+                ]),
+            )
+        )
+        already_queued_channel_ids = set(existing_attempts_res.scalars().all())
+        channels_to_publish = [c for c in channels_to_publish if c.id not in already_queued_channel_ids]
+
     if channels_to_publish:
         publisher = get_publisher()
         queue = get_publishing_queue()

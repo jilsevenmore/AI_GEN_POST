@@ -11,8 +11,8 @@ import clsx from 'clsx'
 import { PlatformIcon } from '../components/PlatformIcon'
 
 const jobSchema = z.object({
-  title: z.string().min(1, 'Title is required').max(200),
-  topic: z.string().min(1, 'Topic is required').max(500),
+  title: z.string().min(1, 'Title is required').max(1000),
+  topic: z.string().min(1, 'Topic is required').max(2000),
   tone: z.string().optional(),
   audience: z.string().optional(),
   keywords: z.string().optional(),

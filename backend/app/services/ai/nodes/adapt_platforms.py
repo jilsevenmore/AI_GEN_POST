@@ -42,8 +42,8 @@ Platform Requirements:
 {platform_specs}
 
 For EACH platform, create:
-1. Platform-optimized text
-2. Relevant hashtags (5-15)
+1. Platform-optimized text (do NOT include hashtags in "text"; put them only in "hashtags")
+2. Relevant hashtags (5-15), without leading '#' characters
 3. Character count
 
 Return ONLY valid JSON array:
@@ -87,8 +87,8 @@ Platform Requirements:
 {platform_specs}
 
 For EACH platform, create:
-1. Platform-optimized text
-2. Relevant hashtags (5-15)
+1. Platform-optimized text (do NOT include hashtags in "text"; put them only in "hashtags")
+2. Relevant hashtags (5-15), without leading '#' characters
 3. Character count
 
 Return ONLY valid JSON array:
@@ -203,6 +203,15 @@ async def adapt_platforms_node(state: GenerationState) -> GenerationState:
             if not isinstance(pc_data, dict):
                 continue
             if pc_data.get("platform") in job.platforms:
+                raw_tags = pc_data.get("hashtags") or []
+                clean_tags = []
+                seen_tags = set()
+                for t in raw_tags:
+                    tag = str(t).strip().lstrip("#")
+                    if tag and tag.lower() not in seen_tags:
+                        seen_tags.add(tag.lower())
+                        clean_tags.append(tag)
+                pc_data["hashtags"] = clean_tags
                 platform_contents.append(PlatformContent(**pc_data))
         
         if not platform_contents:

@@ -2,8 +2,10 @@
 import logging
 import uuid
 import base64
+import time
 import httpx
 from typing import List, Optional
+from langsmith import traceable
 from app.services.ai.state import GenerationState, ImageVariant, ReferenceImage
 from app.core.config import get_settings
 
@@ -163,14 +165,14 @@ async def _generate_single_image(
 
 
 def _aspect_to_dimensions(aspect_ratio: str) -> tuple:
-    """Convert aspect ratio to pixel dimensions (platform-friendly sizes)."""
+    """Convert aspect ratio to pixel dimensions divisible by 16 (required by Sunburst API)."""
     ratios = {
-        "1:1": (1080, 1080),      # Universal square (IG/FB/LinkedIn)
-        "4:5": (1080, 1350),      # Instagram/Facebook portrait feed
-        "1.91:1": (1200, 628),    # LinkedIn/Facebook landscape
-        "9:16": (1080, 1920),     # Stories/Reels (when applicable)
+        "1:1": (1024, 1024),      # Universal square (IG/FB/LinkedIn)
+        "4:5": (1024, 1280),      # Instagram/Facebook portrait feed (exact 4:5)
+        "1.91:1": (1200, 624),    # LinkedIn/Facebook landscape (~1.91:1)
+        "9:16": (1008, 1792),     # Stories/Reels (exact 9:16)
     }
-    return ratios.get(aspect_ratio, (1080, 1080))
+    return ratios.get(aspect_ratio, (1024, 1024))
 
 
 def _build_image_prompt(base_prompt: str, aspect_ratio: str, brand) -> str:
@@ -190,6 +192,7 @@ def _build_image_prompt(base_prompt: str, aspect_ratio: str, brand) -> str:
     return " | ".join(parts)
 
 
+@traceable(name="sunburst_image_generation", run_type="llm")
 async def _call_sunburst_api(
     prompt: str,
     size: str,
@@ -205,10 +208,16 @@ async def _call_sunburst_api(
     from app.core.config import get_settings
     
     settings = get_settings()
-    
+
     if not settings.SUNBURST_API_KEY:
         raise RuntimeError("SUNBURST_API_KEY not configured")
-    
+
+    from app.core.logging import log_llm_call, log_llm_error, log_llm_response
+
+    sunburst_model = settings.SUNBURST_MODEL
+    start = time.perf_counter()
+    log_llm_call("sunburst", sunburst_model, prompt=prompt)
+
     headers = {
         "Authorization": f"Bearer {settings.SUNBURST_API_KEY}",
         "Content-Type": "application/json",
@@ -226,33 +235,48 @@ async def _call_sunburst_api(
         payload["reference_images"] = reference_images[:16]
     
     async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(
-            f"{settings.SUNBURST_BASE_URL}/images/generations",
-            headers=headers,
-            json=payload,
-        )
-        
-        if response.status_code != 200:
-            raise RuntimeError(f"Sunburst API error {response.status_code}: {response.text}")
-        
-        result = response.json()
-        
-        # Handle different response formats (url or b64_json)
-        data_item = result.get("data", [{}])[0]
-        image_url = data_item.get("url")
-        
-        if not image_url:
-            # Try b64_json format (Sunburst may return base64)
-            b64_json = data_item.get("b64_json")
-            if b64_json:
-                # Upload to Cloudinary when configured so Buffer/other platforms can fetch it
-                image_url = _upload_image_to_cloudinary(b64_json)
-                if not image_url:
-                    image_url = f"data:image/png;base64,{b64_json}"
-            else:
-                raise RuntimeError("Sunburst API returned no image URL or b64_json")
-        
-        return image_url
+        try:
+            response = await client.post(
+                f"{settings.SUNBURST_BASE_URL}/images/generations",
+                headers=headers,
+                json=payload,
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(f"Sunburst API error {response.status_code}: {response.text}")
+
+            result = response.json()
+
+            # Handle different response formats (url or b64_json)
+            data_item = result.get("data", [{}])[0]
+            image_url = data_item.get("url")
+
+            if not image_url:
+                # Try b64_json format (Sunburst may return base64)
+                b64_json = data_item.get("b64_json")
+                if b64_json:
+                    # Upload to Cloudinary when configured so Buffer/other platforms can fetch it
+                    image_url = _upload_image_to_cloudinary(b64_json)
+                    if not image_url:
+                        image_url = f"data:image/png;base64,{b64_json}"
+                else:
+                    raise RuntimeError("Sunburst API returned no image URL or b64_json")
+
+            log_llm_response(
+                "sunburst",
+                sunburst_model,
+                response=f"image_url={image_url}",
+                latency_ms=(time.perf_counter() - start) * 1000,
+            )
+            return image_url
+        except Exception as e:
+            log_llm_error(
+                "sunburst",
+                sunburst_model,
+                e,
+                latency_ms=(time.perf_counter() - start) * 1000,
+            )
+            raise
 
 
 def _upload_image_to_cloudinary(b64_data: str) -> Optional[str]:

@@ -276,7 +276,7 @@ export function ReviewPage() {
           ? (editedTexts as Record<Platform, string>)
           : undefined,
         schedule_at: scheduleISO,
-        auto_publish: true,
+        auto_publish: false,
       },
       {
         onSuccess: (response: { data: { id: string } }) => {
@@ -552,9 +552,13 @@ export function ReviewPage() {
               <div className="border-t border-gray-200 pt-4">
                 <h4 className="font-medium text-gray-900 mb-3">Hashtags</h4>
                 <div className="flex flex-wrap gap-2">
-                  {content.platform_contents.flatMap((pc) => pc.hashtags).filter((h, i, arr) => arr.indexOf(h) === i).map((tag) => (
-                    <span key={tag} className="badge badge-primary">#{tag}</span>
-                  ))}
+                  {content.platform_contents
+                    .flatMap((pc) => pc.hashtags)
+                    .map((h) => h.replace(/^#+/, '').trim())
+                    .filter((h, i, arr) => h && arr.findIndex((x) => x.toLowerCase() === h.toLowerCase()) === i)
+                    .map((tag) => (
+                      <span key={tag} className="badge badge-primary">#{tag}</span>
+                    ))}
                 </div>
               </div>
             </div>

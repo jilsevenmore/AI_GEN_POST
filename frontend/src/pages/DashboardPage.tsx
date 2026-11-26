@@ -47,7 +47,8 @@ function getGreeting() {
 
 export function DashboardPage() {
   const { user } = useAuth()
-  const { jobs, total, isLoading, error, refetch } = useJobsList({ page_size: 20 })
+  const [page, setPage] = useState(1)
+  const { jobs, total, isLoading, error, refetch } = useJobsList({ page, page_size: 10 })
   const { cancelJob } = useJobActions()
 
   const activeJob = jobs.find((j) => ACTIVE_STATUSES.includes(j.status))
@@ -64,6 +65,8 @@ export function DashboardPage() {
   const approvedCount = jobs.filter(j => ['approved', 'published'].includes(j.status)).length
   const publishedCount = jobs.filter(j => j.status === 'published').length
   const reviewCount = jobs.filter(j => j.status === 'awaiting_review').length
+
+  const totalPages = Math.ceil(total / 10)
 
   const firstName = user?.email?.split('@')[0] ?? 'there'
 
@@ -269,6 +272,48 @@ export function DashboardPage() {
               })}
             </div>
 
+            {/* ── Pagination (mobile) ── */}
+            {totalPages > 1 && (
+              <div className="px-4 py-3 border-t border-gray-200 flex items-center justify-between">
+                <span className="text-sm text-gray-500">
+                  Page {page} of {totalPages}
+                </span>
+                <div className="flex gap-1 items-center">
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page === 1}
+                    className="btn-secondary text-sm"
+                  >
+                    Previous
+                  </button>
+                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setPage(p)}
+                      disabled={page === p}
+                      className={clsx(
+                        'text-sm px-3 py-1 rounded-md border transition-colors',
+                        page === p
+                          ? 'bg-primary-600 text-white border-primary-600'
+                          : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+                      )}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page === totalPages}
+                    className="btn-secondary text-sm"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* ── Desktop: table ── */}
+
             {/* ── Desktop: table ── */}
             <div className="hidden sm:block overflow-x-auto">
               <table className="w-full">
@@ -341,6 +386,46 @@ export function DashboardPage() {
                 </tbody>
               </table>
             </div>
+
+            {/* ── Pagination (desktop) ── */}
+            {totalPages > 1 && (
+              <div className="px-4 py-3 border-t border-gray-200 flex items-center justify-between">
+                <span className="text-sm text-gray-500">
+                  Page {page} of {totalPages}
+                </span>
+                <div className="flex gap-1 items-center">
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page === 1}
+                    className="btn-secondary text-sm"
+                  >
+                    Previous
+                  </button>
+                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setPage(p)}
+                      disabled={page === p}
+                      className={clsx(
+                        'text-sm px-3 py-1 rounded-md border transition-colors',
+                        page === p
+                          ? 'bg-primary-600 text-white border-primary-600'
+                          : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+                      )}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page === totalPages}
+                    className="btn-secondary text-sm"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

@@ -11,6 +11,7 @@ from app.services.scheduled_jobs import (
     cleanup_old_images,
     cleanup_failed_jobs,
     cleanup_old_publish_attempts,
+    recover_stale_publish_attempts,
     generate_missing_search_vectors,
     reset_daily_quotas,
 )
@@ -78,6 +79,16 @@ def start_scheduler() -> None:
         IntervalTrigger(hours=6, timezone="UTC"),
         id="generate_missing_search_vectors",
         name="Generate missing search vectors",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Every 5 minutes - recover stale pending/retrying publish attempts missing from Redis
+    scheduler.add_job(
+        recover_stale_publish_attempts,
+        IntervalTrigger(minutes=5, timezone="UTC"),
+        id="recover_stale_publish_attempts",
+        name="Recover stale publish attempts",
         max_instances=1,
         coalesce=True,
     )

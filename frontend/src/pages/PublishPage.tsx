@@ -31,21 +31,28 @@ interface ChannelListProps {
   getLatestAttempt: (channelId: string) => PublishAttemptResponse | undefined
 }
 
+const isChannelLocked = (attempt?: PublishAttemptResponse) =>
+  attempt?.status === 'sent' || attempt?.status === 'pending' || attempt?.status === 'retrying'
+
 const ChannelList = ({ channels, selectedChannels, onToggleChannel, getLatestAttempt }: ChannelListProps) => (
   <div className="space-y-2.5">
     {channels.map((channel) => {
       const latestAttempt = getLatestAttempt(channel.id)
       const isSelected = selectedChannels.includes(channel.id)
       const status = latestAttempt?.status
+      const isLocked = isChannelLocked(latestAttempt)
 
       return (
         <button
           key={channel.id}
           type="button"
-          onClick={() => onToggleChannel(channel.id)}
+          disabled={isLocked}
+          onClick={() => !isLocked && onToggleChannel(channel.id)}
           className={clsx(
             'group w-full text-left flex items-center justify-between p-3.5 sm:p-4 rounded-xl border transition-all duration-150',
-            isSelected
+            isLocked
+              ? 'border-gray-200 bg-gray-50/60 opacity-80 cursor-not-allowed'
+              : isSelected
               ? 'border-primary-500 bg-primary-50/50 shadow-xs ring-1 ring-primary-500/20'
               : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50/70 hover:shadow-xs'
           )}
@@ -110,14 +117,16 @@ const ChannelList = ({ channels, selectedChannels, onToggleChannel, getLatestAtt
               </div>
             )}
 
-            <div className={clsx(
-              'w-5 h-5 rounded-md border flex items-center justify-center transition-all duration-150',
-              isSelected
-                ? 'bg-primary-600 border-primary-600 text-white shadow-xs'
-                : 'border-gray-300 bg-white group-hover:border-primary-400'
-            )}>
-              {isSelected && <Check className="h-3.5 w-3.5 stroke-[3]" />}
-            </div>
+            {!isLocked && (
+              <div className={clsx(
+                'w-5 h-5 rounded-md border flex items-center justify-center transition-all duration-150',
+                isSelected
+                  ? 'bg-primary-600 border-primary-600 text-white shadow-xs'
+                  : 'border-gray-300 bg-white group-hover:border-primary-400'
+              )}>
+                {isSelected && <Check className="h-3.5 w-3.5 stroke-[3]" />}
+              </div>
+            )}
           </div>
         </button>
       )
@@ -142,7 +151,11 @@ export function PublishPage() {
     queryKey: ['publish', 'attempts', contentId],
     queryFn: () => publishApi.getAttempts(contentId!),
     enabled: !!contentId,
-    refetchInterval: 5000,
+    refetchInterval: (query) => {
+      const items = query.state.data?.data
+      if (!items || items.length === 0) return false
+      return items.some((a) => a.status === 'pending' || a.status === 'retrying') ? 5000 : false
+    },
   })
 
   const publishMutation = useMutation({
@@ -168,6 +181,16 @@ export function PublishPage() {
   const channels = channelsResponse?.data || []
   const attempts = attemptsResponse?.data || []
 
+  const getLatestAttempt = (channelId: string) => {
+    const channelAttempts = attempts
+      .filter((a) => a.channel_id === channelId)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    // Prefer a succeeded ('sent') attempt so a later duplicate/retry failure doesn't mask a live post
+    return channelAttempts.find((a) => a.status === 'sent') ?? channelAttempts[0]
+  }
+
+  const selectableChannels = channels.filter((c) => !isChannelLocked(getLatestAttempt(c.id)))
+
   const handlePublish = () => {
     if (selectedChannels.length === 0) {
       alert('Please select at least one channel to publish to.')
@@ -189,10 +212,11 @@ export function PublishPage() {
   }
 
   const handleSelectAllToggle = () => {
-    if (selectedChannels.length === channels.length) {
+    if (selectableChannels.length === 0) return
+    if (selectedChannels.length === selectableChannels.length) {
       setSelectedChannels([])
     } else {
-      setSelectedChannels(channels.map((c) => c.id))
+      setSelectedChannels(selectableChannels.map((c) => c.id))
     }
   }
 
@@ -204,14 +228,6 @@ export function PublishPage() {
     if (preset === 'tomorrow_morning') target = setMinutes(setHours(addDays(now, 1), 9), 0)
     if (preset === 'tomorrow_evening') target = setMinutes(setHours(addDays(now, 1), 18), 0)
     setScheduleAt(target)
-  }
-
-  const getLatestAttempt = (channelId: string) => {
-    const channelAttempts = attempts
-      .filter((a) => a.channel_id === channelId)
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    // Prefer a succeeded ('sent') attempt so a later duplicate/retry failure doesn't mask a live post
-    return channelAttempts.find((a) => a.status === 'sent') ?? channelAttempts[0]
   }
 
   if (channelsLoading) {
@@ -267,13 +283,15 @@ export function PublishPage() {
                   <span className="text-xs font-medium text-gray-500 hidden sm:inline">
                     {selectedChannels.length} of {channels.length} selected
                   </span>
-                  <button
-                    type="button"
-                    onClick={handleSelectAllToggle}
-                    className="text-xs font-semibold text-primary-600 hover:text-primary-700 bg-primary-50 px-2.5 py-1 rounded-lg transition-colors"
-                  >
-                    {selectedChannels.length === channels.length ? 'Deselect All' : 'Select All'}
-                  </button>
+                  {selectableChannels.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleSelectAllToggle}
+                      className="text-xs font-semibold text-primary-600 hover:text-primary-700 bg-primary-50 px-2.5 py-1 rounded-lg transition-colors"
+                    >
+                      {selectedChannels.length === selectableChannels.length ? 'Deselect All' : 'Select All'}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -482,16 +500,23 @@ export function PublishPage() {
                       </td>
                       <td className="px-5 py-3.5">
                         {status ? (
-                          <span className={clsx(
-                            'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border',
-                            status === 'sent' && 'bg-emerald-50 text-emerald-700 border-emerald-200',
-                            status === 'failed' && 'bg-red-50 text-red-700 border-red-200',
-                            status === 'pending' && 'bg-amber-50 text-amber-700 border-amber-200',
-                            status === 'retrying' && 'bg-blue-50 text-blue-700 border-blue-200'
-                          )}>
-                            <StatusIcon status={status} />
-                            {statusConfig[status]?.label}
-                          </span>
+                          <div className="space-y-1">
+                            <span className={clsx(
+                              'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border',
+                              status === 'sent' && 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                              status === 'failed' && 'bg-red-50 text-red-700 border-red-200',
+                              status === 'pending' && 'bg-amber-50 text-amber-700 border-amber-200',
+                              status === 'retrying' && 'bg-blue-50 text-blue-700 border-blue-200'
+                            )}>
+                              <StatusIcon status={status} />
+                              {statusConfig[status]?.label}
+                            </span>
+                            {status === 'failed' && latest?.error && (
+                              <p className="text-xs text-red-600 max-w-xs truncate" title={latest.error}>
+                                {latest.error}
+                              </p>
+                            )}
+                          </div>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border bg-gray-100 text-gray-500 border-gray-200">
                             <MinusCircle className="h-3 w-3" />
