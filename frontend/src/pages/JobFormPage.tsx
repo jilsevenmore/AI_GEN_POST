@@ -3,29 +3,34 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { ArrowLeft, Sparkles, Loader2, Image, X, Search, Check } from 'lucide-react'
 import { jobsApi, libraryApi } from '../api/services'
 import type { JobCreate, JobType, Platform, LibraryImageResponse, ImageAspectRatio } from '../api/types'
 import clsx from 'clsx'
+import { PlatformIcon } from '../components/PlatformIcon'
 
 const jobSchema = z.object({
-  title: z.string().min(1, 'Title is required').max(200),
-  topic: z.string().min(1, 'Topic is required').max(500),
+  title: z.string().min(1, 'Title is required').max(1000),
+  topic: z.string().min(1, 'Topic is required').max(2000),
   tone: z.string().optional(),
   audience: z.string().optional(),
   keywords: z.string().optional(),
   image_description: z.string().optional(),
   platforms: z.array(z.enum(['instagram', 'facebook', 'linkedin'])).default([]),
   use_references: z.boolean().default(true),
+  instagram_post_type: z.enum(['feed', 'story', 'reel']).optional(),
+  instagram_cover_image_url: z.string().url().optional().or(z.literal('')),
+  aspect_ratios: z.array(z.enum(['1:1', '4:5', '1.91:1', '9:16'])).default([]),
+  generate_image: z.boolean().default(false),
 })
 
 type JobForm = z.infer<typeof jobSchema>
 
-const PLATFORM_OPTIONS: { value: Platform; label: string; icon: string }[] = [
-  { value: 'instagram', label: 'Instagram', icon: '📷' },
-  { value: 'facebook', label: 'Facebook', icon: '📘' },
-  { value: 'linkedin', label: 'LinkedIn', icon: '💼' },
+const PLATFORM_OPTIONS: { value: Platform; label: string }[] = [
+  { value: 'instagram', label: 'Instagram' },
+  { value: 'facebook', label: 'Facebook' },
+  { value: 'linkedin', label: 'LinkedIn' },
 ]
 
 const TONE_OPTIONS = [
@@ -42,8 +47,22 @@ const ASPECT_RATIOS: { value: ImageAspectRatio; label: string }[] = [
   { value: '1:1', label: 'Square (1:1)' },
   { value: '4:5', label: 'Portrait (4:5)' },
   { value: '1.91:1', label: 'Landscape (1.91:1)' },
-  { value: '9:16', label: 'Story (9:16)' },
+  { value: '9:16', label: 'Story/Reel (9:16)' },
 ]
+
+// Allowed image aspect ratios per platform for feed/post images (official platform constraints)
+const PLATFORM_ALLOWED_ASPECT_RATIOS: Record<Platform, ImageAspectRatio[]> = {
+  instagram: ['1:1', '4:5', '1.91:1'], // IG feed API accepts 4:5 to 1.91:1 range
+  facebook: ['1:1', '4:5', '1.91:1'],
+  linkedin: ['1:1', '4:5', '1.91:1'],  // LinkedIn single image: 3:1 to 4:5 (w:h)
+}
+
+function getAllowedAspectRatios(platforms: Platform[]): ImageAspectRatio[] {
+  if (!platforms.length) return ASPECT_RATIOS.map((a) => a.value)
+  const sets = platforms.map((p) => new Set(PLATFORM_ALLOWED_ASPECT_RATIOS[p] || []))
+  const intersection = sets.reduce((acc, s) => new Set([...acc].filter((x) => s.has(x))))
+  return ASPECT_RATIOS.map((a) => a.value).filter((v) => intersection.has(v))
+}
 
 // Reference Picker Modal Component
 function ReferencePickerModal({
@@ -184,17 +203,45 @@ export function JobFormPage() {
       platforms: [],
       use_references: true,
       tone: 'Professional',
+      generate_image: false,
     },
   })
 
   const selectedPlatforms = watch('platforms')
   const useReferences = watch('use_references')
+  const generateImage = watch('generate_image')
   const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([])
   const [showReferencePicker, setShowReferencePicker] = useState(false)
   const [refSearchQuery, setRefSearchQuery] = useState('')
   const [refSelectedTags, setRefSelectedTags] = useState<string[]>([])
   const [refAspectRatio, setRefAspectRatio] = useState<ImageAspectRatio | ''>('')
   const [refPage, setRefPage] = useState(1)
+
+  // Attached source document (.md / .txt) used as generation context
+  const [sourceFile, setSourceFile] = useState<File | null>(null)
+  const [sourceFileText, setSourceFileText] = useState<string>('')
+  const [sourceFileName, setSourceFileName] = useState<string>('')
+  const [sourceFileUploading, setSourceFileUploading] = useState(false)
+
+  // Aspect ratio selection for generated images
+  const [selectedAspectRatios, setSelectedAspectRatios] = useState<ImageAspectRatio[]>([])
+  const allowedAspectRatios = getAllowedAspectRatios(selectedPlatforms || [])
+
+  useEffect(() => {
+    setSelectedAspectRatios((prev) => prev.filter((r) => allowedAspectRatios.includes(r)))
+  }, [selectedPlatforms?.join(',')])
+
+  const toggleAspectRatio = (ratio: ImageAspectRatio) => {
+    setSelectedAspectRatios((prev) =>
+      prev.includes(ratio) ? prev.filter((r) => r !== ratio) : [...prev, ratio]
+    )
+  }
+
+  // Instagram-specific settings
+  const [instagramPostType, setInstagramPostType] = useState<'feed' | 'story' | 'reel'>('feed')
+  const [instagramCoverImageUrl, setInstagramCoverImageUrl] = useState<string>('')
+
+  const showInstagramOptions = selectedPlatforms.includes('instagram') && jobType === 'blog'
 
   const createMutation = useMutation({
     mutationFn: (data: JobCreate) => jobsApi.create(data),
@@ -238,12 +285,53 @@ export function JobFormPage() {
     )
   }
 
-  const onSubmit = (data: JobForm) => {
+  const MAX_SOURCE_BYTES = 5 * 1024 * 1024 // 5 MB
+
+  const handleSourceFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const ext = file.name.toLowerCase().split('.').pop() ?? ''
+    if (!['md', 'markdown', 'txt'].includes(ext)) {
+      alert('Please upload a .md, .markdown, or .txt file.')
+      return
+    }
+    if (file.size > MAX_SOURCE_BYTES) {
+      alert('File too large. Max 5 MB.')
+      return
+    }
+
+    setSourceFile(file)
+    setSourceFileName(file.name)
+
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string
+      setSourceFileText(text)
+    }
+    reader.onerror = () => {
+      alert('Could not read the file. Make sure it is valid UTF-8 text.')
+      setSourceFile(null)
+      setSourceFileName('')
+    }
+    reader.readAsText(file)
+  }
+
+  const removeSourceFile = () => {
+    setSourceFile(null)
+    setSourceFileText('')
+    setSourceFileName('')
+    // Reset the file input so the same file can be re-selected
+    const input = document.querySelector('input[type="file"][accept=".md,.markdown,.txt"]') as HTMLInputElement | null
+    if (input) input.value = ''
+  }
+
+  const onSubmit = async (data: JobForm) => {
     const keywords = data.keywords
       ? data.keywords.split(',').map((k) => k.trim()).filter(Boolean)
       : []
 
-    createMutation.mutate({
+    // Send source context text with the job create so the AI has it from the start.
+    const jobPayload: JobCreate = {
       type: jobType,
       title: data.title,
       topic: data.topic,
@@ -254,44 +342,56 @@ export function JobFormPage() {
       platforms: data.platforms,
       use_references: data.use_references,
       reference_image_ids: selectedReferenceIds,
-    })
+      source_context: sourceFileText || undefined,
+      instagram_post_type: showInstagramOptions ? instagramPostType : undefined,
+      instagram_cover_image_url: showInstagramOptions && instagramCoverImageUrl ? instagramCoverImageUrl : undefined,
+      aspect_ratios: selectedAspectRatios,
+      generate_image: data.generate_image,
+    }
+
+    try {
+      const response = await createMutation.mutateAsync(jobPayload)
+      const jobId = response.data.id
+
+      // Upload the attached source document after the job is created.
+      if (sourceFile) {
+        setSourceFileUploading(true)
+        try {
+          await jobsApi.uploadSourceFile(jobId, sourceFile)
+        } finally {
+          setSourceFileUploading(false)
+        }
+      }
+
+      navigate(`/review/${jobId}`)
+    } catch {
+      // createMutation already surfaces errors via react-query; keep UI responsive
+    }
   }
 
   return (
     <>
-      <div className="max-w-3xl mx-auto space-y-6">
+      <div className="w-full space-y-6 pb-12">
         <div className="flex items-center gap-4">
           <button onClick={() => navigate('/dashboard')} className="btn-ghost p-2" aria-label="Go back">
             <ArrowLeft className="h-5 w-5" />
           </button>
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">
+            <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 tracking-tight">
               {jobType === 'blog' ? 'Write Blog Post' : 'Create Social Post'}
             </h1>
-            <p className="text-gray-500">
+            <p className="text-sm text-gray-500">
               {jobType === 'blog'
-                ? 'Generate a full blog article with matching image'
-                : 'Generate posts for Instagram, Facebook & LinkedIn'}
+                ? 'Generate a comprehensive blog article with matching AI visuals'
+                : 'Generate tailored posts for Instagram, Facebook & LinkedIn'}
             </p>
           </div>
         </div>
 
-        <div className="card p-4 bg-primary-50 border-primary-100">
-          <div className="flex items-center gap-2 text-primary-700">
-            <Sparkles className="h-5 w-5" />
-            <span className="font-medium">AI-Powered Generation</span>
-            <span className="text-sm text-primary-500">→</span>
-            <span className="text-sm">Expand prompt</span>
-            <span className="text-sm text-primary-500">→</span>
-            <span className="text-sm">Write content</span>
-            <span className="text-sm text-primary-500">→</span>
-            <span className="text-sm">Generate image</span>
-            <span className="text-sm text-primary-500">→</span>
-            <span className="text-sm">Review & approve</span>
-          </div>
-        </div>
-
-        <form onSubmit={handleSubmit(onSubmit)} className="card p-6 space-y-6" noValidate>
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+          {/* Main Form (8 cols on lg) */}
+          <div className="lg:col-span-8 space-y-6">
+            <form onSubmit={handleSubmit(onSubmit)} className="card p-6 sm:p-7 space-y-6" noValidate>
           <div className="space-y-4">
             <h2 className="text-lg font-semibold text-gray-900">Content Details</h2>
 
@@ -311,6 +411,115 @@ export function JobFormPage() {
               {errors.topic && <p className="mt-1 text-sm text-red-600">{errors.topic.message}</p>}
               <p className="mt-1 text-sm text-gray-500">Be specific — the AI uses this to create a detailed brief.</p>
             </div>
+
+            {/* Source document attachment */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="label">Source Document (optional)</label>
+                {sourceFile && (
+                  <button
+                    type="button"
+                    onClick={removeSourceFile}
+                    className="text-xs text-red-600 hover:text-red-800 underline"
+                    disabled={isSubmitting || sourceFileUploading}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+
+              {!sourceFile ? (
+                <>
+                  <div
+                    className="flex items-center justify-center gap-2 px-4 py-3 rounded-lg border-2 border-dashed border-gray-300 bg-gray-50/50 text-sm text-gray-600 hover:border-primary-300 hover:bg-primary-50/50 transition-colors"
+                    role="button"
+                    onClick={() => {
+                      const input = document.querySelector('input[type="file"][accept=".md,.markdown,.txt"]') as HTMLInputElement | null
+                      input?.click()
+                    }}
+                  >
+                    <span className="text-lg">+</span>
+                    <span>Upload source file (.md, .txt)</span>
+                  </div>
+                  <input
+                    type="file"
+                    accept=".md,.markdown,.txt"
+                    className="hidden"
+                    onChange={handleSourceFileChange}
+                  />
+                </>
+              ) : (
+                <div className="flex items-center gap-3 px-4 py-3 rounded-lg border border-primary-200 bg-primary-50">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-primary-700">📄</span>
+                    <span className="text-sm font-medium text-primary-800 truncate max-w-[200px]" title={sourceFileName}>
+                      {sourceFileName}
+                    </span>
+                    <span className="text-xs text-primary-500">{((sourceFile?.size || 0) / 1024).toFixed(1)} KB</span>
+                  </div>
+                  {sourceFileUploading && (
+                    <span className="text-xs text-primary-500 animate-pulse">Uploading context…</span>
+                  )}
+                  <p className="mt-1 text-xs text-gray-500">
+                    The AI will ground the post/blog in this document when generating content.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Instagram Post Type (only for blog + Instagram) */}
+            {showInstagramOptions && (
+              <div className="space-y-4 border-t border-purple-200 pt-6 bg-purple-5">
+                <h2 className="text-lg font-semibold text-gray-900">Instagram Post Settings</h2>
+
+                <div>
+                  <label htmlFor="instagram_post_type" className="label">Post Type</label>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { value: 'feed', label: 'Feed Post', icon: '📸', desc: 'Square post in feed' },
+                      { value: 'story', label: 'Story', icon: '⭕', desc: 'Vertical story (24h)' },
+                      { value: 'reel', label: 'Reel', icon: '🎬', desc: 'Vertical short video' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setInstagramPostType(opt.value as 'feed' | 'story' | 'reel')}
+                        className={clsx(
+                          'flex flex-col items-center gap-1 px-3 py-2 rounded-lg border-2 text-sm font-medium transition-all min-w-[80px]',
+                          instagramPostType === opt.value
+                            ? 'border-purple-500 bg-purple-50 text-purple-700'
+                            : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                        )} disabled={isSubmitting}
+                      >
+                        <span className="text-lg">{opt.icon}</span>
+                        <span>{opt.label}</span>
+                        <span className="text-xs text-gray-400">{opt.desc}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    The AI will optimize the Instagram caption and image aspect ratio for {instagramPostType}.
+                  </p>
+                </div>
+
+                <div>
+                  <label htmlFor="instagram_cover_image_url" className="label">Cover Image URL (optional)</label>
+                  <input
+                    {...register('instagram_cover_image_url')}
+                    id="instagram_cover_image_url"
+                    type="text"
+                    className="input"
+                    placeholder="https://example.com/cover.jpg"
+                    disabled={isSubmitting}
+                    value={instagramCoverImageUrl}
+                    onChange={(e) => setInstagramCoverImageUrl(e.target.value)}
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Optional cover image URL for Instagram stories and reels.
+                  </p>
+                </div>
+              </div>
+            )}
 
             <div className="grid sm:grid-cols-2 gap-4">
               <div>
@@ -337,7 +546,27 @@ export function JobFormPage() {
           </div>
 
           <div className="space-y-4 border-t border-gray-200 pt-6">
-            <h2 className="text-lg font-semibold text-gray-900">Image Settings</h2>
+            {/* Generate Image Toggle */}
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <input
+                  {...register('generate_image')}
+                  id="generate_image"
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500" disabled={isSubmitting}
+                />
+                <label htmlFor="generate_image" className="text-sm font-semibold text-gray-700">
+                  Generate AI Image
+                </label>
+                <p className="text-xs text-gray-500">
+                  {generateImage ? 'Image will be created alongside your content' : 'Skip image generation (text only)'}
+                </p>
+              </div>
+            </div>
+
+            {generateImage && (
+              <>
+                <h2 className="text-lg font-semibold text-gray-900">Image Settings</h2>
 
             <div>
               <label htmlFor="image_description" className="label">Image Description</label>
@@ -347,14 +576,42 @@ export function JobFormPage() {
             </div>
 
             <div>
+              <label className="label">Aspect Ratios</label>
+              <div className="flex flex-wrap gap-2">
+                {ASPECT_RATIOS.filter((ar) => allowedAspectRatios.includes(ar.value)).map((ar) => {
+                  const isSelected = selectedAspectRatios.includes(ar.value)
+                  return (
+                    <button
+                      key={ar.value}
+                      type="button"
+                      onClick={() => toggleAspectRatio(ar.value)}
+                      className={clsx(
+                        'flex items-center gap-2 px-4 py-2 rounded-lg border-2 text-sm font-medium transition-all',
+                        isSelected
+                          ? 'border-primary-500 bg-primary-50 text-primary-700'
+                          : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                      )} disabled={isSubmitting}>
+                      {ar.label}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="mt-1 text-sm text-gray-500">
+                Leave empty to auto-select ratios based on your chosen platforms. Available sizes are filtered by platform requirements (e.g. Instagram/LinkedIn/Facebook feed posts support 1:1, 4:5, 1.91:1).
+              </p>
+            </div>
+          </>)}  
+
+            <div>
               <label className="label">Platforms</label>
               <div className="flex flex-wrap gap-2">
                 {PLATFORM_OPTIONS.map((platform) => (
                   <button key={platform.value} type="button" onClick={() => handlePlatformToggle(platform.value)}
-                    className={clsx('flex items-center gap-2 px-4 py-2 rounded-lg border-2 text-sm font-medium transition-all',
-                      selectedPlatforms.includes(platform.value) ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-gray-200 text-gray-600 hover:border-gray-300')} disabled={isSubmitting}>
-                  <span className="text-lg">{platform.icon}</span> {platform.label}
-                </button>
+                    className={clsx('flex items-center gap-2 px-4 py-2.5 rounded-lg border-2 text-sm font-medium transition-all',
+                      selectedPlatforms.includes(platform.value) ? 'border-primary-500 bg-primary-50 text-primary-700 shadow-sm' : 'border-gray-200 text-gray-600 hover:border-gray-300')} disabled={isSubmitting}>
+                    <PlatformIcon platform={platform.value} className="h-4 w-4" />
+                    <span>{platform.label}</span>
+                  </button>
                 ))}
               </div>
               {selectedPlatforms.length === 0 && <p className="mt-1 text-sm text-yellow-600">Select at least one platform for publishing.</p>}
@@ -398,11 +655,11 @@ export function JobFormPage() {
                 </div>
               )}
             </div>
-          </div>
+              </div>
 
           <div className="flex justify-end gap-3 border-t border-gray-200 pt-6">
             <button type="button" onClick={() => navigate('/dashboard')} className="btn-secondary" disabled={isSubmitting}>Cancel</button>
-            <button type="submit" className="btn-primary" disabled={isSubmitting || selectedPlatforms.length === 0}>
+            <button type="submit" className="btn-primary" disabled={isSubmitting || (generateImage && selectedPlatforms.length === 0)}>
               {isSubmitting ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin mr-2" />
@@ -418,6 +675,49 @@ export function JobFormPage() {
           </div>
         </form>
       </div>
+
+      {/* Right Sidebar Guide (4 cols on lg) */}
+      <div className="lg:col-span-4 space-y-5 lg:sticky lg:top-20">
+        <div className="card p-5 bg-primary-50/70 border border-primary-100 rounded-2xl space-y-4">
+          <div className="flex items-center gap-2 text-primary-800 font-semibold text-sm">
+            <Sparkles className="h-4 w-4 text-primary-600" />
+            <span>AI Pipeline Workflow</span>
+          </div>
+          <ol className="space-y-2.5 text-xs text-primary-950 font-medium">
+            <li className="flex items-start gap-2">
+              <span className="w-5 h-5 rounded-full bg-primary-200 text-primary-800 flex items-center justify-center text-xs flex-shrink-0">1</span>
+              <span><strong>Prompt Expansion:</strong> AI analyzes your topic and brand voice</span>
+            </li>
+            <li className="flex items-start gap-2">
+              <span className="w-5 h-5 rounded-full bg-primary-200 text-primary-800 flex items-center justify-center text-xs flex-shrink-0">2</span>
+              <span><strong>Content Draft:</strong> Writes tailored copy for each selected platform</span>
+            </li>
+            {generateImage && (
+              <li className="flex items-start gap-2">
+                <span className="w-5 h-5 rounded-full bg-primary-200 text-primary-800 flex items-center justify-center text-xs flex-shrink-0">3</span>
+                <span><strong>Image Generation:</strong> Renders imagery matched to aspect ratios</span>
+              </li>
+            )}
+            <li className="flex items-start gap-2">
+              <span className="w-5 h-5 rounded-full bg-primary-200 text-primary-800 flex items-center justify-center text-xs flex-shrink-0">
+                {generateImage ? '4' : '3'}
+              </span>
+              <span><strong>Human Review:</strong> Edit, regenerate, or publish directly</span>
+            </li>
+          </ol>
+        </div>
+
+        <div className="card p-5 rounded-2xl border border-gray-200 space-y-3">
+          <h4 className="font-semibold text-gray-900 text-sm">Tips for Great Results</h4>
+          <ul className="space-y-2 text-xs text-gray-600 leading-relaxed">
+            <li>• <strong>Be descriptive:</strong> Mention concrete details, target outcomes, or themes.</li>
+            <li>• <strong>Source context:</strong> Upload notes or briefs to ground the AI generation in factual data.</li>
+            <li>• <strong>Aspect ratios:</strong> Choose 1:1 for Instagram feed, 4:5 for LinkedIn/FB, and 9:16 for Stories/Reels.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
 
       <ReferencePickerModal
         isOpen={showReferencePicker}

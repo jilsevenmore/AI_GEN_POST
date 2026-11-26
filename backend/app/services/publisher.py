@@ -1,17 +1,26 @@
 """Publisher interface and Buffer implementation."""
 import abc
+import asyncio
+import base64
+import hashlib
 import logging
+import os
+import re
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from uuid import UUID
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
+import redis.asyncio as aioredis
 from cryptography.fernet import Fernet
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.channel import ChannelConnection
 from app.models.content import Content
+from app.models.job import Job
 from app.models.publish import PublishAttempt
 from app.services.scheduled_jobs import reset_daily_quotas
 
@@ -78,12 +87,70 @@ class Publisher(abc.ABC):
         pass
 
 
+# Fallback in-memory PKCE store: state -> code_verifier (used if Redis is unavailable)
+_pkce_store: Dict[str, str] = {}
+_PKCE_TTL_SECONDS = 600
+
+
+async def _store_pkce_verifier(state: str, code_verifier: str) -> None:
+    """Persist PKCE code verifier in Redis with in-memory fallback."""
+    _pkce_store[state] = code_verifier
+    try:
+        r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            await r.set(f"buffer:pkce:{state}", code_verifier, ex=_PKCE_TTL_SECONDS)
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.warning("Redis unavailable for PKCE store; using in-memory fallback: %s", exc)
+
+
+async def _get_pkce_verifier(state: str) -> Optional[str]:
+    """Retrieve PKCE code verifier from Redis or in-memory fallback."""
+    try:
+        r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            val = await r.get(f"buffer:pkce:{state}")
+            if val:
+                return val
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        logger.warning("Redis unavailable reading PKCE store; checking in-memory fallback: %s", exc)
+    return _pkce_store.get(state)
+
+
+async def _delete_pkce_verifier(state: str) -> None:
+    """Delete PKCE code verifier after successful exchange."""
+    _pkce_store.pop(state, None)
+    try:
+        r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            await r.delete(f"buffer:pkce:{state}")
+        finally:
+            await r.aclose()
+    except Exception:
+        pass
+
+
 class BufferPublisher(Publisher):
-    """Buffer API publisher implementation."""
+    """Buffer API publisher implementation (current GraphQL API)."""
     
-    BASE_URL = "https://api.bufferapp.com/1"
-    OAUTH_AUTH_URL = "https://publish.buffer.com/oauth2/authorize"
-    OAUTH_TOKEN_URL = "https://api.bufferapp.com/1/oauth2/token.json"
+    # New Buffer OAuth endpoints
+    BASE_URL = "https://api.buffer.com"
+    OAUTH_AUTH_URL = "https://auth.buffer.com/auth"
+    OAUTH_TOKEN_URL = "https://auth.buffer.com/token"
+    
+    # OAuth scopes for the current Buffer API
+    OAUTH_SCOPES = [
+        "posts:write",
+        "posts:read",
+        "ideas:read",
+        "ideas:write",
+        "account:read",
+        "account:write",
+        "offline_access",
+    ]
     
     # Platform-specific image aspect ratios
     PLATFORM_ASPECT_RATIOS = {
@@ -94,7 +161,7 @@ class BufferPublisher(Publisher):
     
     # Character limits per platform
     PLATFORM_CHAR_LIMITS = {
-        "instagram": 2200,
+        "instagram": 2000,
         "facebook": 63206,
         "linkedin": 3000,
     }
@@ -113,6 +180,11 @@ class BufferPublisher(Publisher):
             base_url=self.BASE_URL,
             timeout=30.0,
         )
+
+        # Per-company locks and latest refreshed tokens to prevent concurrent
+        # refresh-token rotation races across sibling Buffer channels.
+        self._refresh_locks: Dict[str, asyncio.Lock] = {}
+        self._latest_company_tokens: Dict[str, tuple[str, Optional[str], Optional[datetime]]] = {}
     
     def get_supported_platforms(self) -> List[str]:
         return ["instagram", "facebook", "linkedin"]
@@ -129,82 +201,200 @@ class BufferPublisher(Publisher):
             return data
         return self._fernet.decrypt(data.encode()).decode()
     
+    # ------------------------------------------------------------------
+    # PKCE helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _generate_code_verifier() -> str:
+        """Generate a random PKCE code verifier."""
+        return base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode("ascii")
+    
+    @staticmethod
+    def _generate_code_challenge(verifier: str) -> str:
+        """Generate SHA-256 code challenge from a verifier."""
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    
+    # ------------------------------------------------------------------
+    # OAuth
+    # ------------------------------------------------------------------
     async def get_authorization_url(self, state: str) -> str:
         """Generate Buffer OAuth authorization URL with PKCE."""
+        code_verifier = self._generate_code_verifier()
+        code_challenge = self._generate_code_challenge(code_verifier)
+
+        # Store the verifier so exchange_code can use it later
+        await _store_pkce_verifier(state, code_verifier)
+        logger.info("Prepared Buffer OAuth authorization URL state=%s redirect_uri=%s", state, self.redirect_uri)
+
         params = {
             "client_id": self.client_id,
             "redirect_uri": self.redirect_uri,
             "response_type": "code",
-            "scope": "posts.write,profiles.read",
+            "scope": " ".join(self.OAUTH_SCOPES),
             "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "prompt": "consent",
         }
-        
-        # Buffer doesn't support PKCE natively, but we include state for CSRF protection
+
         query = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{self.OAUTH_AUTH_URL}?{query}"
     
-    async def exchange_code(self, code: str, state: str) -> ChannelConnection:
-        """Exchange OAuth code for access/refresh tokens."""
+    async def exchange_code(self, code: str, state: str) -> List[ChannelConnection]:
+        """Exchange OAuth code for access/refresh tokens, creating channel connections for all channels."""
+        logger.info("Exchanging Buffer OAuth code state=%s", state)
+        code_verifier = await _get_pkce_verifier(state)
+        if not code_verifier:
+            logger.warning("Buffer OAuth exchange failed: missing PKCE verifier state=%s", state)
+            raise ValueError("No PKCE code verifier found for this state (may have expired)")
+
         data = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
-            "redirect_uri": self.redirect_uri,
-            "code": code,
             "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": self.redirect_uri,
+            "code_verifier": code_verifier,
         }
-        
-        response = await self.client.post(self.OAUTH_TOKEN_URL, data=data)
+
+        response = await self.client.post(
+            self.OAUTH_TOKEN_URL,
+            data=data,
+        )
         response.raise_for_status()
+        await _delete_pkce_verifier(state)
         token_data = response.json()
-        
-        # Get user's profiles to determine platform
-        profiles = await self._get_profiles(token_data["access_token"])
-        
-        # Create channel connections for each profile
-        # For now, we'll return the first one - in production you'd create multiple
-        primary_profile = profiles[0]
-        
-        return ChannelConnection(
-            platform=primary_profile["service"],
-            external_account_id=primary_profile["id"],
-            account_name=primary_profile.get("formatted_username", primary_profile["service_username"]),
-            access_token_encrypted=self._encrypt(token_data["access_token"]),
-            refresh_token_encrypted=self._encrypt(token_data.get("refresh_token", "")),
-            token_expires_at=datetime.now(timezone.utc) + timedelta(seconds=token_data.get("expires_in", 3600)),
-            is_active=True,
-        )
+
+        access_token = token_data["access_token"]
+        refresh_token = token_data.get("refresh_token", "")
+        expires_in = token_data.get("expires_in", 3600)
+        logger.info("Buffer OAuth token exchange succeeded expires_in=%s has_refresh_token=%s", expires_in, bool(refresh_token))
+
+        # Get user's channels across all organizations
+        channels = await self._get_channels(access_token)
+        if not channels:
+            logger.warning("Buffer OAuth succeeded but no channels were returned")
+            raise ValueError("No channels found for this Buffer account")
+
+        # Create channel connections for each channel
+        channel_connections: List[ChannelConnection] = []
+        for channel in channels:
+            channel_connections.append(
+                ChannelConnection(
+                    platform=channel["service"],
+                    external_account_id=channel["id"],
+                    account_name=channel.get("displayName", channel.get("name", channel["service"])),
+                    access_token_encrypted=self._encrypt(access_token),
+                    refresh_token_encrypted=self._encrypt(refresh_token) if refresh_token else "",
+                    token_expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_in),
+                    is_active=True,
+                )
+            )
+
+        logger.info("Created %s Buffer channel connection objects from OAuth", len(channel_connections))
+        return channel_connections
     
-    async def _get_profiles(self, access_token: str) -> List[Dict]:
-        """Get connected profiles from Buffer."""
-        response = await self.client.get(
-            "/profiles.json",
-            params={"access_token": access_token},
-        )
-        response.raise_for_status()
-        return response.json()
+    async def _get_channels(self, access_token: str) -> List[Dict]:
+        """Get connected channels from Buffer using GraphQL across all organizations."""
+        # First get account info to find organization IDs
+        account_query = """
+        query Account {
+          account {
+            id
+            email
+            organizations {
+              id
+              name
+            }
+          }
+        }
+        """
+        
+        try:
+            account_data = await self._graphql(access_token, account_query)
+            account = account_data.get("account", {})
+            organizations = account.get("organizations", [])
+            
+            if not organizations:
+                logger.error("No organizations found for this Buffer account")
+                return []
+            
+            all_channels: List[Dict] = []
+            
+            for org in organizations:
+                org_id = org["id"]
+                
+                channels_query = """
+                query GetChannels {
+                  channels(input: {
+                    organizationId: %s
+                  }) {
+                    id
+                    name
+                    displayName
+                    service
+                    avatar
+                    isQueuePaused
+                  }
+                }
+                """ % json_escape(org_id)
+                
+                data = await self._graphql(access_token, channels_query)
+                channels = data.get("channels", [])
+                logger.info(f"Organization {org.get('name')} ({org_id}): {len(channels)} channels")
+                all_channels.extend(channels)
+            
+            return all_channels
+        except Exception as e:
+            logger.error(f"Failed to fetch channels: {e}")
+            return []
     
     async def refresh_token(self, channel: ChannelConnection) -> ChannelConnection:
         """Refresh OAuth access token."""
+        platform = getattr(channel.platform, "value", str(channel.platform))
+        logger.info("Refreshing Buffer token channel_id=%s platform=%s account=%s", getattr(channel, "id", None), platform, getattr(channel, "account_name", None))
         if not channel.refresh_token_encrypted:
+            logger.warning("Token refresh skipped: no refresh token channel_id=%s platform=%s", getattr(channel, "id", None), platform)
             raise ValueError("No refresh token available")
-        
+
         data = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "grant_type": "refresh_token",
             "refresh_token": self._decrypt(channel.refresh_token_encrypted),
         }
-        
-        response = await self.client.post(self.OAUTH_TOKEN_URL, data=data)
-        response.raise_for_status()
+
+        response = await self.client.post(
+            self.OAUTH_TOKEN_URL,
+            data=data,
+        )
+        try:
+            response.raise_for_status()
+        except Exception:
+            logger.warning(
+                "Buffer token refresh failed channel_id=%s platform=%s status=%s body=%s",
+                getattr(channel, "id", None),
+                platform,
+                response.status_code,
+                response.text[:300],
+            )
+            raise
         token_data = response.json()
-        
+
         channel.access_token_encrypted = self._encrypt(token_data["access_token"])
         if "refresh_token" in token_data:
             channel.refresh_token_encrypted = self._encrypt(token_data["refresh_token"])
         channel.token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=token_data.get("expires_in", 3600))
         channel.updated_at = datetime.now(timezone.utc)
-        
+        logger.info(
+            "Buffer token refreshed channel_id=%s platform=%s expires_at=%s rotated_refresh=%s",
+            getattr(channel, "id", None),
+            platform,
+            channel.token_expires_at,
+            "refresh_token" in token_data,
+        )
+
         return channel
     
     async def disconnect(self, channel: ChannelConnection) -> bool:
@@ -218,11 +408,82 @@ class BufferPublisher(Publisher):
     def _get_access_token(self, channel: ChannelConnection) -> str:
         """Get decrypted access token."""
         return self._decrypt(channel.access_token_encrypted)
+
+    def _company_lock_key(self, channel: ChannelConnection) -> str:
+        """Return a stable per-company lock key for Buffer OAuth token refreshes."""
+        company_id = getattr(channel, "company_id", None)
+        return str(company_id) if company_id is not None else f"channel:{getattr(channel, 'id', 'default')}"
+
+    def _get_refresh_lock(self, key: str) -> asyncio.Lock:
+        """Get or create an asyncio.Lock for the given company key."""
+        lock = self._refresh_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._refresh_locks[key] = lock
+        return lock
+
+    def clear_cached_tokens(self, company_id: UUID) -> None:
+        """Clear cached refreshed tokens for a company (e.g., on Buffer reconnect)."""
+        self._latest_company_tokens.pop(str(company_id), None)
+
+    async def _refresh_channel_token_locked(
+        self,
+        channel: ChannelConnection,
+        failed_access_token: str,
+    ) -> str:
+        """Refresh Buffer OAuth token under a per-company lock, deduplicating concurrent refreshes."""
+        key = self._company_lock_key(channel)
+        lock = self._get_refresh_lock(key)
+        async with lock:
+            cached = self._latest_company_tokens.get(key)
+            if cached is not None:
+                cached_access_enc, cached_refresh_enc, cached_expires_at = cached
+                cached_access = self._decrypt(cached_access_enc)
+                if cached_access and cached_access != failed_access_token:
+                    channel.access_token_encrypted = cached_access_enc
+                    channel.refresh_token_encrypted = cached_refresh_enc
+                    channel.token_expires_at = cached_expires_at
+                    channel.updated_at = datetime.now(timezone.utc)
+                    return cached_access
+
+            refreshed = await self.refresh_token(channel)
+            channel.access_token_encrypted = refreshed.access_token_encrypted
+            channel.refresh_token_encrypted = refreshed.refresh_token_encrypted
+            channel.token_expires_at = refreshed.token_expires_at
+            channel.updated_at = refreshed.updated_at or datetime.now(timezone.utc)
+            self._latest_company_tokens[key] = (
+                channel.access_token_encrypted,
+                channel.refresh_token_encrypted,
+                channel.token_expires_at,
+            )
+            return self._get_access_token(channel)
     
-    def _select_best_image(self, content: Content, platform: str) -> str:
+    # ------------------------------------------------------------------
+    # GraphQL helpers
+    # ------------------------------------------------------------------
+    async def _graphql(self, access_token: str, query: str) -> Dict:
+        """Make a GraphQL request to the Buffer API."""
+        response = await self.client.post(
+            "",
+            json={"query": query},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        if "errors" in data:
+            error_msgs = [e.get("message", str(e)) for e in data["errors"]]
+            raise RuntimeError(f"Buffer GraphQL error: {'; '.join(error_msgs)}")
+        
+        return data.get("data", {})
+    
+    # ------------------------------------------------------------------
+    # Publish
+    # ------------------------------------------------------------------
+    def _select_best_image(self, content: Content, platform: str) -> Optional[str]:
         """Select best image variant for platform."""
         if not content.image_variants:
-            raise ValueError("No image variants available")
+            return None
         
         # Get preferred aspect ratios for platform
         preferred = self.PLATFORM_ASPECT_RATIOS.get(platform, ["1:1"])
@@ -242,25 +503,44 @@ class BufferPublisher(Publisher):
         
         return content.image_variants[0]["url"]
     
-    def _get_platform_text(self, content: Content, platform: str) -> str:
-        """Get platform-specific text."""
-        for pc in content.platform_contents:
-            if pc.get("platform") == platform:
-                text = pc.get("text", "")
-                hashtags = pc.get("hashtags", [])
-                if hashtags:
-                    text += "\n\n" + " ".join(f"#{h}" for h in hashtags)
+    def _get_platform_text(self, content: Content, platform: Any) -> str:
+        """Get platform-specific text, appending only non-duplicate hashtags."""
+        platform_key = getattr(platform, "value", str(platform)).lower()
+        for pc in (content.platform_contents or []):
+            pc_platform = getattr(pc.get("platform"), "value", str(pc.get("platform", ""))).lower()
+            if pc_platform == platform_key:
+                text = (pc.get("text") or "").rstrip()
+                hashtags = pc.get("hashtags") or []
+                existing_tags = {t.lower() for t in re.findall(r"#([A-Za-z0-9_]+)", text)}
+                tags_to_append: List[str] = []
+                for raw_tag in hashtags:
+                    clean = str(raw_tag).strip().lstrip("#")
+                    if not clean:
+                        continue
+                    key = clean.lower()
+                    if key in existing_tags:
+                        continue
+                    existing_tags.add(key)
+                    tags_to_append.append(f"#{clean}")
+                if tags_to_append:
+                    separator = "\n\n" if text else ""
+                    text = f"{text}{separator}{' '.join(tags_to_append)}"
                 return text
         
         # Fallback to long text
-        return content.long_text
+        return content.long_text or ""
     
-    def _truncate_text(self, text: str, platform: str) -> str:
+    def _truncate_text(self, text: str, platform: Any) -> str:
         """Truncate text to platform limit."""
-        limit = self.PLATFORM_CHAR_LIMITS.get(platform, 3000)
+        platform_key = getattr(platform, "value", str(platform)).lower()
+        limit = self.PLATFORM_CHAR_LIMITS.get(platform_key, 2200 if platform_key == "instagram" else 3000)
         if len(text) <= limit:
             return text
         return text[:limit - 3] + "..."
+    
+    def _mode_for_schedule(self, schedule_at: Optional[datetime]) -> str:
+        """Determine the sharing mode based on scheduling."""
+        return "shareNow" if schedule_at is None else "addToQueue"
     
     async def publish(
         self,
@@ -270,92 +550,248 @@ class BufferPublisher(Publisher):
         text: str,
         schedule_at: Optional[datetime] = None,
     ) -> PublishResult:
-        """Publish content to Buffer."""
+        """Publish content to Buffer using the GraphQL API."""
+        platform = getattr(channel.platform, "value", str(channel.platform))
+        logger.info(
+            "Buffer publish start channel_id=%s platform=%s account=%s content_id=%s scheduled=%s image_public=%s text_len=%s",
+            getattr(channel, "id", None),
+            platform,
+            getattr(channel, "account_name", None),
+            getattr(content, "id", None),
+            bool(schedule_at),
+            bool(image_url and (image_url.startswith("http://") or image_url.startswith("https://"))),
+            len(text or ""),
+        )
         access_token = self._get_access_token(channel)
-        
-        # Prepare payload
-        payload = {
-            "access_token": access_token,
-            "profile_ids[]": channel.external_account_id,
-            "text": text,
-            "media[photo]": image_url,
-        }
-        
-        if schedule_at:
-            # Buffer uses Unix timestamp
-            payload["scheduled_at"] = int(schedule_at.timestamp())
-        else:
-            payload["now"] = "true"
-        
-        try:
-            response = await self.client.post(
-                "/updates/create.json",
-                data=payload,
+
+        # Buffer requires publicly accessible image URLs (not data: URLs)
+        if image_url and image_url.startswith("data:"):
+            logger.warning("Buffer publish rejected: non-public image channel_id=%s platform=%s", getattr(channel, "id", None), platform)
+            return PublishResult(
+                success=False,
+                error="Image must be a publicly accessible URL (data URLs/base64 images are not supported by Buffer). Upload the image to a public host and try again.",
+                error_code="MEDIA_NOT_PUBLIC",
             )
-            
-            if response.status_code == 401:
-                # Token expired, try refresh
+
+        # Determine scheduling
+        if schedule_at:
+            mode = "customScheduled"
+            scheduling_type = "automatic"
+            due_at = schedule_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        else:
+            mode = "shareNow"
+            scheduling_type = "automatic"
+            due_at = None
+
+        # Build assets array for image post
+        assets_block = ""
+        if image_url and (image_url.startswith("http://") or image_url.startswith("https://")):
+            assets_block = "assets: [{ image: { url: %s } }]," % json_escape(image_url)
+
+        # Platform-specific metadata required by Buffer
+        metadata_block = ""
+        if platform == "instagram":
+            # Default to feed post; could be extended to support story/reel
+            metadata_block = "metadata: { instagram: { type: post, shouldShareToFeed: true } },"
+        elif platform == "facebook":
+            metadata_block = "metadata: { facebook: { type: post } },"
+
+        # Ensure text does not exceed platform limits
+        text = self._truncate_text(text or "", platform)
+
+        due_at_block = ""
+        if due_at:
+            due_at_block = "dueAt: %s," % json_escape(due_at)
+
+        mutation = """
+        mutation CreatePost {
+          createPost(input: {
+            text: %s,
+            channelId: %s,
+            schedulingType: %s,
+            mode: %s,
+            %s
+            %s
+            %s
+          }) {
+            ... on PostActionSuccess {
+              post {
+                id
+                text
+              }
+            }
+            ... on MutationError {
+              message
+            }
+          }
+        }
+        """ % (
+            json_escape(text),
+            json_escape(channel.external_account_id),
+            scheduling_type,
+            mode,
+            due_at_block,
+            assets_block,
+            metadata_block,
+        )
+
+        async def _attempt(token: str):
+            data = await self._graphql(token, mutation)
+            result = data.get("createPost", {})
+            if "post" in result:
+                post_id = result["post"]["id"]
+                logger.info("Buffer publish succeeded channel_id=%s platform=%s external_post_id=%s mode=%s", getattr(channel, "id", None), platform, post_id, mode)
+                return PublishResult(success=True, external_post_id=post_id)
+            msg = result.get("message", "No post ID returned")
+            logger.warning("Buffer publish mutation returned error channel_id=%s platform=%s message=%s", getattr(channel, "id", None), platform, msg)
+            return PublishResult(
+                success=False,
+                error=msg,
+                error_code="NO_POST_ID",
+            )
+
+        try:
+            return await _attempt(access_token)
+        except (RuntimeError, httpx.HTTPStatusError) as e:
+            error_str = str(e)
+            if "401" in error_str or "unauthorized" in error_str.lower():
+                logger.warning("Buffer publish unauthorized channel_id=%s platform=%s; attempting token refresh", getattr(channel, "id", None), platform)
+                # Try one refresh if possible (locked per company to avoid refresh-token rotation races)
+                refreshed_token: Optional[str] = None
+                if channel.refresh_token_encrypted:
+                    try:
+                        refreshed_token = await self._refresh_channel_token_locked(channel, access_token)
+                    except Exception as refresh_err:
+                        logger.warning("Token refresh failed during publish channel_id=%s platform=%s: %s", getattr(channel, "id", None), platform, refresh_err)
+                if refreshed_token:
+                    try:
+                        return await _attempt(refreshed_token)
+                    except (RuntimeError, httpx.HTTPStatusError) as retry_err:
+                        retry_str = str(retry_err)
+                        if "401" not in retry_str and "unauthorized" not in retry_str.lower():
+                            logger.warning("Buffer publish API error after refresh channel_id=%s platform=%s error=%s", getattr(channel, "id", None), platform, retry_str)
+                            return PublishResult(
+                                success=False,
+                                error=f"Buffer API error: {retry_str}",
+                                error_code="API_ERROR",
+                            )
                 return PublishResult(
                     success=False,
-                    error="Token expired",
+                    error="Token expired or unauthorized. Please reconnect Buffer.",
                     error_code="TOKEN_EXPIRED",
                 )
-            
-            response.raise_for_status()
-            result = response.json()
-            
-            # Buffer returns updates array
-            updates = result.get("updates", [])
-            if updates:
-                external_id = updates[0].get("id")
-                return PublishResult(
-                    success=True,
-                    external_post_id=external_id,
-                )
-            
+            logger.warning("Buffer publish API error channel_id=%s platform=%s error=%s", getattr(channel, "id", None), platform, error_str)
             return PublishResult(
                 success=False,
-                error="No update ID returned",
-                error_code="NO_UPDATE_ID",
+                error=f"Buffer API error: {error_str}",
+                error_code="API_ERROR",
             )
-            
-        except httpx.HTTPStatusError as e:
-            error_detail = ""
-            try:
-                error_detail = e.response.json().get("error", str(e))
-            except:
-                error_detail = str(e)
-            
-            # Categorize errors
-            if e.response.status_code == 429:
-                error_code = "RATE_LIMITED"
-            elif e.response.status_code == 400:
-                if "image" in error_detail.lower():
-                    error_code = "IMAGE_REJECTED"
-                elif "media" in error_detail.lower():
-                    error_code = "MEDIA_FETCH_FAILED"
-                else:
-                    error_code = "INVALID_REQUEST"
-            elif e.response.status_code == 401:
-                error_code = "TOKEN_EXPIRED"
-            elif e.response.status_code == 403:
-                error_code = "PERMISSION_DENIED"
-            else:
-                error_code = "API_ERROR"
-            
-            return PublishResult(
-                success=False,
-                error=f"Buffer API error: {error_detail}",
-                error_code=error_code,
-            )
-        
         except Exception as e:
-            logger.error(f"Publish failed: {e}")
+            logger.exception("Publish failed channel_id=%s platform=%s: %s", getattr(channel, "id", None), platform, e)
             return PublishResult(
                 success=False,
                 error=f"Publish failed: {str(e)}",
                 error_code="UNKNOWN_ERROR",
             )
+
+
+# ------------------------------------------------------------------
+# Token persistence helper
+# ------------------------------------------------------------------
+async def persist_refreshed_channel_tokens(
+    db: AsyncSession,
+    channel: ChannelConnection,
+    previous_access_token_encrypted: str,
+) -> None:
+    """Persist refreshed Buffer tokens to the channel and any active sibling channels.
+
+    Note: Fernet encryption produces a different ciphertext each time the same
+    plaintext token is encrypted, so sibling matching must compare decrypted
+    tokens rather than raw ciphertext.
+    """
+    if channel.access_token_encrypted == previous_access_token_encrypted:
+        return
+
+    publisher = get_publisher()
+    try:
+        prev_plain = publisher._decrypt(previous_access_token_encrypted)
+    except Exception:
+        prev_plain = None
+
+    result = await db.execute(
+        select(ChannelConnection).where(
+            ChannelConnection.company_id == channel.company_id,
+            ChannelConnection.is_active == True,
+        )
+    )
+    matching_ids = []
+    for sibling in result.scalars().all():
+        if sibling.id == channel.id or sibling.access_token_encrypted == previous_access_token_encrypted:
+            matching_ids.append(sibling.id)
+            continue
+        if prev_plain:
+            try:
+                if publisher._decrypt(sibling.access_token_encrypted) == prev_plain:
+                    matching_ids.append(sibling.id)
+            except Exception:
+                pass
+
+    if not matching_ids:
+        matching_ids = [channel.id]
+
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(ChannelConnection)
+        .where(ChannelConnection.id.in_(matching_ids))
+        .values(
+            access_token_encrypted=channel.access_token_encrypted,
+            refresh_token_encrypted=channel.refresh_token_encrypted,
+            token_expires_at=channel.token_expires_at,
+            updated_at=now,
+        )
+    )
+    logger.info(
+        "Persisted refreshed Buffer tokens company_id=%s channel_id=%s updated_count=%s",
+        channel.company_id,
+        channel.id,
+        len(matching_ids),
+    )
+
+
+async def sync_job_publish_status(db: AsyncSession, content_id: UUID) -> None:
+    """Sync parent Job status/current_step from its Content's PublishAttempt statuses."""
+    job_result = await db.execute(
+        select(Job).join(Content, Content.job_id == Job.id).where(Content.id == content_id)
+    )
+    job = job_result.scalar_one_or_none()
+    if not job:
+        return
+
+    statuses_result = await db.execute(
+        select(PublishAttempt.status).where(PublishAttempt.content_id == content_id)
+    )
+    statuses = [getattr(s, "value", str(s)) for s in statuses_result.scalars().all()]
+    if not statuses:
+        return
+
+    if any(s in ("pending", "retrying") for s in statuses):
+        job.status = "publishing"
+        job.current_step = "Publishing to channels..."
+    elif any(s == "sent" for s in statuses):
+        job.status = "published"
+        job.current_step = "Published"
+    else:
+        job.status = "failed"
+        job.current_step = "Publishing failed"
+    job.updated_at = datetime.now(timezone.utc)
+
+
+# ------------------------------------------------------------------
+# JSON string escaping helper for GraphQL
+# ------------------------------------------------------------------
+def json_escape(s: str) -> str:
+    """Escape a string for safe inclusion in a GraphQL query string literal."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
 # Factory for getting publisher

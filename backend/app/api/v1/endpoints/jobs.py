@@ -1,13 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query, UploadFile, File, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from typing import List, Optional
 from uuid import UUID, uuid4
 from datetime import datetime, timezone
+from pathlib import Path
 from app.db.session import get_db
 from app.schemas.common import (
-    JobCreate, JobResponse, JobListResponse, JobStatus, JobType, Platform
+    JobCreate, JobResponse, JobListResponse, JobStatus, JobType, Platform,
+    SourceFileUploadResponse,
 )
 from app.core.dependencies import get_current_user, get_current_company
 from app.models.job import Job
@@ -28,6 +30,20 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
 ):
     """Start a new AI generation job (blog or post)."""
+    platform_values = [p.value for p in job_data.platforms]
+    # Filter aspect ratios to those supported by all selected platforms (feed/post constraints)
+    platform_allowed = {
+        "instagram": {"1:1", "4:5", "1.91:1"},
+        "facebook": {"1:1", "4:5", "1.91:1"},
+        "linkedin": {"1:1", "4:5", "1.91:1"},
+    }
+    if platform_values:
+        allowed = set.intersection(*(set(platform_allowed.get(p, {"1:1","4:5","1.91:1","9:16"})) for p in platform_values)) or {"1:1"}
+    else:
+        allowed = {"1:1", "4:5", "1.91:1", "9:16"}
+    requested_ratios = [str(r.value if hasattr(r, "value") else r) for r in (job_data.aspect_ratios or [])]
+    filtered_ratios = [r for r in requested_ratios if r in allowed]
+
     job = Job(
         company_id=current_company.id,
         user_id=current_user.id,
@@ -38,9 +54,14 @@ async def create_job(
         audience=job_data.audience,
         keywords=job_data.keywords,
         image_description=job_data.image_description,
-        platforms=[p.value for p in job_data.platforms],
+        platforms=platform_values,
         use_references=job_data.use_references,
         reference_image_ids=job_data.reference_image_ids,
+        source_context_text=job_data.source_context,
+        instagram_post_type=job_data.instagram_post_type,
+        instagram_cover_image_url=job_data.instagram_cover_image_url,
+        aspect_ratios=filtered_ratios,
+        generate_image=job_data.generate_image,
         status=JobStatus.pending,
         progress=0,
         current_step="queued",
@@ -65,16 +86,22 @@ async def create_job(
     # Convert to AI service types
     job_input = JobInput(
         job_id=job.id,
-        type=job_data.type,
+        company_id=current_company.id,
+        type=job_data.type.value,  # Convert JobType enum to string literal
         title=job_data.title,
         topic=job_data.topic,
         tone=job_data.tone,
         audience=job_data.audience,
         keywords=job_data.keywords,
         image_description=job_data.image_description,
-        platforms=[p.value for p in job_data.platforms],
+        platforms=platform_values,
         use_references=job_data.use_references,
         reference_image_ids=job_data.reference_image_ids,
+        source_context=job_data.source_context,
+        instagram_post_type=job_data.instagram_post_type,
+        instagram_cover_image_url=job_data.instagram_cover_image_url,
+        aspect_ratios=filtered_ratios,
+        generate_image=job_data.generate_image,
     )
     
     brand_kit_data = BrandKitData(
@@ -88,10 +115,121 @@ async def create_job(
         use_openai_only=brand_kit_model.use_openai_only,
     )
     
-    # Start background generation
-    background_tasks.add_task(run_generation_job, job_input, brand_kit_data, db)
+    # Start background generation (pass job_id only — avoids Pydantic serialization issues)
+    from app.db.session import AsyncSessionLocal
+    background_tasks.add_task(
+        run_generation_job,
+        str(job.id),
+        str(current_company.id),
+        AsyncSessionLocal,
+    )
     
     return JobResponse.model_validate(job)
+
+
+@router.post("/{job_id}/source-files", response_model=SourceFileUploadResponse, status_code=status.HTTP_201_CREATED)
+async def upload_source_file(
+    job_id: UUID,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    current_company = Depends(get_current_company),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a source document (.md / .txt) to a job.
+
+    The file is stored (Cloudinary) and its text is extracted and saved on the job
+    as generation context. The AI uses this context when writing the post/blog.
+    """
+    # Validate job exists and belongs to the current company
+    result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.company_id == current_company.id)
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # --- File validation ---
+    MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
+    ALLOWED_EXTENSIONS = {".md", ".markdown", ".txt"}
+    ALLOWED_MIME_PREFIXES = ("text/", "application/markdown")
+
+    filename = file.filename or "source.md"
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if not any(filename.lower().endswith(e) for e in ALLOWED_EXTENSIONS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}."
+        )
+
+    if file.content_type and not any(
+        file.content_type.startswith(p) for p in ALLOWED_MIME_PREFIXES
+    ):
+        # Be lenient: some browsers send application/octet-stream for .md
+        if file.content_type not in ("application/octet-stream",):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid content type '{file.content_type}'. Expected a text file."
+            )
+
+    # Read file bytes
+    contents = await file.read()
+    if len(contents) > MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large ({len(contents)} bytes). Max {MAX_FILE_BYTES} bytes."
+        )
+    if len(contents) == 0:
+        raise HTTPException(status_code=400, detail="Empty file.")
+
+    # Decode text (UTF-8)
+    try:
+        source_text = contents.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="File is not valid UTF-8 text. Please upload a .md or .txt file."
+        )
+
+    # Cap stored context to prevent oversized DB/LLM payloads (generation uses truncated excerpts)
+    MAX_SOURCE_CONTEXT_CHARS = 200000
+    if len(source_text) > MAX_SOURCE_CONTEXT_CHARS:
+        source_text = source_text[:MAX_SOURCE_CONTEXT_CHARS] + "\n\n[Source document truncated for storage/processing]"
+
+    # --- Storage: upload to Cloudinary (raw) when configured; fallback to placeholder URL ---
+    import uuid as _uuid
+    object_name = f"{current_company.id}/{job_id}/{_uuid.uuid4().hex}_{Path(filename).stem}"
+    file_url = f"https://res.cloudinary.com/demo/raw/upload/v1/source_files/{object_name}"
+    try:
+        from app.services.cloudinary_service import upload_text_to_cloudinary
+        file_url = await upload_text_to_cloudinary(
+            source_text,
+            filename=filename,
+            folder="source_files",
+            public_id=object_name,
+            tags=[str(current_company.id), str(job_id), "source_file"],
+        )
+    except Exception:
+        # Cloudinary not configured or upload failed; keep placeholder URL and stored text
+        pass
+
+    # --- Persist to job ---
+    job.source_file_name = filename
+    job.source_file_url = file_url
+    job.source_context_text = source_text
+    job.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(job)
+
+    preview = source_text[:500] + ("…" if len(source_text) > 500 else "")
+
+    return SourceFileUploadResponse(
+        file_id=job.id,
+        file_name=filename,
+        file_url=file_url,
+        size_bytes=len(contents),
+        extracted_text_preview=preview,
+        context_stored=bool(source_text.strip()),
+    )
 
 
 @router.get("", response_model=JobListResponse)
@@ -168,6 +306,44 @@ async def cancel_job(
     return None
 
 
+@router.post("/{job_id}/retry", response_model=JobResponse)
+async def retry_job(
+    job_id: UUID,
+    background_tasks: BackgroundTasks,
+    current_company = Depends(get_current_company),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retry a failed generation job."""
+    result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.company_id == current_company.id)
+    )
+    job = result.scalar_one_or_none()
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if job.status != JobStatus.failed:
+        raise HTTPException(status_code=400, detail="Only failed jobs can be retried")
+    
+    job.status = JobStatus.pending
+    job.progress = 0
+    job.current_step = "queued"
+    job.error = None
+    job.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(job)
+    
+    from app.db.session import AsyncSessionLocal
+    background_tasks.add_task(
+        run_generation_job,
+        str(job.id),
+        str(current_company.id),
+        AsyncSessionLocal,
+    )
+    
+    return JobResponse.model_validate(job)
+
+
 # Keep simulate-progress for testing (can remove later)
 @router.post("/{job_id}/simulate-progress", response_model=JobResponse)
 async def simulate_job_progress(
@@ -203,3 +379,93 @@ async def simulate_job_progress(
     await db.refresh(job)
     
     return JobResponse.model_validate(job)
+
+
+_ACTIVE_WS_STATUSES = {
+    "pending",
+    "expanding_prompt",
+    "writing_text",
+    "generating_image",
+    "safety_check",
+    "adapting",
+    "regenerating",
+}
+
+
+@router.websocket("/{job_id}/ws")
+async def job_progress_ws(
+    websocket: WebSocket,
+    job_id: UUID,
+    token: Optional[str] = Query(default=None),
+):
+    """Stream real-time job progress updates over a single WebSocket connection."""
+    import asyncio
+    from jose import JWTError
+    from app.core.security import decode_token
+    from app.db.session import AsyncSessionLocal
+    from app.services.job_events import subscribe_job, unsubscribe_job
+
+    if not token:
+        await websocket.close(code=4401)
+        return
+
+    try:
+        payload = decode_token(token)
+        user_id = payload.get("sub")
+        company_id = payload.get("company_id")
+        token_type = payload.get("type")
+        if not user_id or not company_id or token_type != "access":
+            await websocket.close(code=4401)
+            return
+        company_uuid = UUID(company_id)
+    except (JWTError, ValueError):
+        await websocket.close(code=4401)
+        return
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Job).where(Job.id == job_id, Job.company_id == company_uuid)
+        )
+        job = result.scalar_one_or_none()
+        if not job:
+            await websocket.close(code=4404)
+            return
+        initial_payload = JobResponse.model_validate(job).model_dump(mode="json")
+
+    await websocket.accept()
+    await websocket.send_json(initial_payload)
+
+    initial_status = getattr(initial_payload.get("status"), "value", initial_payload.get("status"))
+    if initial_status not in _ACTIVE_WS_STATUSES:
+        await websocket.close(code=1000)
+        return
+
+    queue = subscribe_job(str(job_id))
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                await websocket.send_json(event)
+                ev_status = getattr(event.get("status"), "value", event.get("status"))
+                if ev_status not in _ACTIVE_WS_STATUSES:
+                    await websocket.close(code=1000)
+                    break
+            except asyncio.TimeoutError:
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(
+                        select(Job).where(Job.id == job_id, Job.company_id == company_uuid)
+                    )
+                    job = result.scalar_one_or_none()
+                    if not job:
+                        await websocket.close(code=4404)
+                        break
+                    snapshot = JobResponse.model_validate(job).model_dump(mode="json")
+                    await websocket.send_json(snapshot)
+                    snap_status = getattr(snapshot.get("status"), "value", snapshot.get("status"))
+                    if snap_status not in _ACTIVE_WS_STATUSES:
+                        await websocket.close(code=1000)
+                        break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        unsubscribe_job(str(job_id), queue)

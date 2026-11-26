@@ -4,6 +4,7 @@ from typing import List
 from sqlalchemy import DateTime, String, ForeignKey, Text, Integer, Boolean, Index, ARRAY
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 from app.db.session import Base
 
 
@@ -27,7 +28,7 @@ class Image(Base):
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
     is_global: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
-    search_vector: Mapped[str | None] = mapped_column(Text, nullable=True)  # For pgvector
+    search_vector = mapped_column(Vector(768), nullable=True)  # pgvector embedding (BAAI/bge-base-en-v1.5)
     approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False

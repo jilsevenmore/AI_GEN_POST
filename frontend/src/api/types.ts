@@ -49,6 +49,23 @@ export interface UserLogin {
   password: string
 }
 
+export interface ForgotPasswordRequest {
+  email: string
+}
+
+export interface ForgotPasswordResponse {
+  message: string
+}
+
+export interface ResetPasswordRequest {
+  code: string
+  new_password: string
+}
+
+export interface ResetPasswordResponse {
+  message: string
+}
+
 export interface UserResponse {
   id: UUID
   email: string
@@ -88,6 +105,13 @@ export interface JobCreate {
   platforms: Platform[]
   use_references: boolean
   reference_image_ids: UUID[]
+  source_context?: string
+  source_file_name?: string
+  source_file_url?: string
+  instagram_post_type?: string
+  instagram_cover_image_url?: string
+  aspect_ratios?: ImageAspectRatio[]
+  generate_image?: boolean
 }
 
 export interface JobResponse extends IDMixin, TimestampMixin {
@@ -105,6 +129,13 @@ export interface JobResponse extends IDMixin, TimestampMixin {
   error?: string
   company_id: UUID
   user_id: UUID
+  source_file_name?: string
+  source_file_url?: string
+  source_context_text?: string
+  instagram_post_type?: string
+  instagram_cover_image_url?: string
+  aspect_ratios?: ImageAspectRatio[]
+  generate_image?: boolean
 }
 
 export interface JobListResponse {
@@ -112,6 +143,15 @@ export interface JobListResponse {
   total: number
   page: number
   page_size: number
+}
+
+export interface SourceFileUploadResponse {
+  file_id: UUID
+  file_name: string
+  file_url: string
+  size_bytes: number
+  extracted_text_preview?: string
+  context_stored: boolean
 }
 
 // Content
@@ -154,9 +194,11 @@ export interface RegenerateRequest {
 }
 
 export interface ApproveRequest {
-  selected_image_id: UUID
+  selected_image_id?: UUID
   edited_text?: Record<Platform, string>
   schedule_at?: string
+  channel_ids?: UUID[]
+  auto_publish?: boolean
 }
 
 export interface ReviewResponse {
@@ -368,3 +410,5 @@ export interface BetaDashboardResponse {
     created_at: string
   }>
 }
+
+

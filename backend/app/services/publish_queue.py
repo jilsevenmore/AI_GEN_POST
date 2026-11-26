@@ -12,11 +12,18 @@ import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, and_
 
+from app.core.config import get_settings
 from app.db.session import AsyncSessionLocal
 from app.models.publish import PublishAttempt
 from app.models.channel import ChannelConnection
 from app.models.content import Content
-from app.services.publisher import get_publisher, Publisher, PublishResult
+from app.services.publisher import (
+    get_publisher,
+    Publisher,
+    PublishResult,
+    persist_refreshed_channel_tokens,
+    sync_job_publish_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +46,7 @@ class PublishJob:
     channel_id: UUID
     platform: str
     text: str
-    image_url: str
+    image_url: Optional[str] = None
     schedule_at: Optional[datetime] = None
     idempotency_key: str = ""
     retry_count: int = 0
@@ -91,7 +98,7 @@ class PublishingQueue:
     RATE_LIMIT_WINDOW = 900  # seconds
     
     def __init__(self, redis_url: str = None):
-        self.redis_url = redis_url or "redis://localhost:6379/0"
+        self.redis_url = redis_url or get_settings().REDIS_URL
         self._redis: Optional[redis.Redis] = None
         self._publisher = get_publisher()
         self._worker_task: Optional[asyncio.Task] = None
@@ -99,9 +106,19 @@ class PublishingQueue:
     
     async def connect(self):
         """Connect to Redis."""
-        self._redis = redis.from_url(self.redis_url, decode_responses=True)
-        await self._redis.ping()
-        logger.info("Publishing queue connected to Redis")
+        try:
+            self._redis = redis.from_url(self.redis_url, decode_responses=True)
+            await self._redis.ping()
+            logger.info("Publishing queue connected to Redis url=%s", self.redis_url)
+        except Exception:
+            self._redis = None
+            logger.exception("Publishing queue could not connect to Redis url=%s", self.redis_url)
+            raise
+
+    async def _ensure_connected(self) -> None:
+        """Ensure Redis is connected, otherwise raise a clear error."""
+        if self._redis is None:
+            raise RuntimeError("Publishing queue is not available (Redis is not connected)")
     
     async def disconnect(self):
         """Disconnect from Redis."""
@@ -113,7 +130,7 @@ class PublishingQueue:
             except asyncio.CancelledError:
                 pass
         if self._redis:
-            await self._redis.close()
+            await self._redis.aclose()
         logger.info("Publishing queue disconnected")
     
     def _get_idempotency_key(self, idempotency_key: str) -> str:
@@ -158,15 +175,19 @@ class PublishingQueue:
         channel: ChannelConnection,
         content: Content,
         text: str,
-        image_url: str,
+        image_url: Optional[str] = None,
+        force: bool = False,
     ) -> bool:
         """Add a publish job to the queue."""
-        # Check idempotency
-        existing_id = await self.check_idempotency(attempt.idempotency_key)
-        if existing_id:
-            logger.info(f"Duplicate publish attempt detected: {attempt.idempotency_key}")
-            return False
-        
+        await self._ensure_connected()
+
+        # Check idempotency unless explicitly bypassed for a manual retry
+        if not force:
+            existing_id = await self.check_idempotency(attempt.idempotency_key)
+            if existing_id:
+                logger.info("Duplicate publish attempt detected key=%s existing_attempt_id=%s", attempt.idempotency_key, existing_id)
+                return False
+
         # Create job
         job = PublishJob(
             attempt_id=attempt.id,
@@ -179,24 +200,23 @@ class PublishingQueue:
             idempotency_key=attempt.idempotency_key,
             retry_count=attempt.retry_count,
         )
-        
+
         # Set idempotency key
         await self.set_idempotency(attempt.idempotency_key, attempt.id)
-        
-        if attempt.scheduled_at and attempt.scheduled_at > datetime.now(timezone.utc):
-            # Schedule for later - add to scheduled queue with score = timestamp
-            score = attempt.scheduled_at.timestamp()
-            await self._redis.zadd(self.SCHEDULED_QUEUE, {job.to_json(): score})
-            logger.info(f"Scheduled publish for {attempt.scheduled_at}: {attempt.id}")
+
+        # Dispatch immediately so scheduled posts are handed off to Buffer
+        # (mode: customScheduled) while schedule_at is still in the future.
+        await self._redis.lpush(self.QUEUE_NAME, job.to_json())
+        if attempt.scheduled_at:
+            logger.info("Queued scheduled publish for immediate Buffer handoff attempt_id=%s schedule_at=%s channel_id=%s", attempt.id, attempt.scheduled_at, attempt.channel_id)
         else:
-            # Add to immediate queue
-            await self._redis.lpush(self.QUEUE_NAME, job.to_json())
-            logger.info(f"Enqueued publish: {attempt.id}")
-        
+            logger.info("Queued immediate publish attempt_id=%s channel_id=%s platform=%s", attempt.id, attempt.channel_id, channel.platform)
+
         return True
     
     async def dequeue(self) -> Optional[PublishJob]:
         """Get next job from queue, checking scheduled queue first."""
+        await self._ensure_connected()
         # First, move any due scheduled jobs to main queue
         await self._move_due_scheduled()
         
@@ -223,16 +243,33 @@ class PublishingQueue:
             logger.info(f"Moved {len(due_jobs)} scheduled jobs to queue")
     
     async def requeue(self, job: PublishJob, delay: float = 0) -> None:
-        """Requeue a job for retry."""
+        """Requeue a job for retry without mutating its target schedule_at."""
         job.retry_count += 1
         if delay > 0:
-            # Schedule for later
-            schedule_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-            job.schedule_at = schedule_at
-            score = schedule_at.timestamp()
-            await self._redis.zadd(self.SCHEDULED_QUEUE, {job.to_json(): score})
+            retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            await self._redis.zadd(self.SCHEDULED_QUEUE, {job.to_json(): retry_at.timestamp()})
         else:
             await self._redis.lpush(self.QUEUE_NAME, job.to_json())
+
+    async def is_attempt_queued(self, attempt_id: UUID) -> bool:
+        """Return True if attempt_id is currently processing, queued, or scheduled for retry."""
+        await self._ensure_connected()
+        target = str(attempt_id)
+        if await self._redis.sismember(self.PROCESSING_SET, target):
+            return True
+        for raw in await self._redis.lrange(self.QUEUE_NAME, 0, -1):
+            try:
+                if str(PublishJob.from_json(raw).attempt_id) == target:
+                    return True
+            except Exception:
+                continue
+        for raw in await self._redis.zrange(self.SCHEDULED_QUEUE, 0, -1):
+            try:
+                if str(PublishJob.from_json(raw).attempt_id) == target:
+                    return True
+            except Exception:
+                continue
+        return False
     
     async def move_to_dead_letter(self, job: PublishJob, error: str) -> None:
         """Move job to dead letter queue."""
@@ -254,6 +291,7 @@ class PublishingQueue:
     
     async def get_queue_stats(self) -> Dict[str, int]:
         """Get queue statistics."""
+        await self._ensure_connected()
         pipe = self._redis.pipeline()
         pipe.llen(self.QUEUE_NAME)
         pipe.zcard(self.SCHEDULED_QUEUE)
@@ -270,68 +308,87 @@ class PublishingQueue:
     
     async def process_job(self, job: PublishJob) -> None:
         """Process a single publish job."""
+        await self._ensure_connected()
         attempt_id = job.attempt_id
-        
+        logger.info("Processing publish job attempt_id=%s channel_id=%s platform=%s retry=%s", attempt_id, job.channel_id, job.platform, job.retry_count)
+
         # Mark as processing
         await self.mark_processing(attempt_id)
-        
+
         try:
             # Get fresh data from DB
             async with AsyncSessionLocal() as db:
                 attempt = await db.get(PublishAttempt, attempt_id)
                 if not attempt:
-                    logger.error(f"Attempt not found: {attempt_id}")
+                    logger.error("Publish attempt not found attempt_id=%s", attempt_id)
                     return
-                
+
                 channel = await db.get(ChannelConnection, job.channel_id)
                 if not channel:
-                    logger.error(f"Channel not found: {job.channel_id}")
+                    logger.error("Channel not found for publish attempt_id=%s channel_id=%s", attempt_id, job.channel_id)
                     attempt.status = "failed"
                     attempt.error = "Channel not found"
+                    await db.flush()
+                    await sync_job_publish_status(db, job.content_id)
                     await db.commit()
                     return
-                
+
                 content = await db.get(Content, job.content_id)
                 if not content:
-                    logger.error(f"Content not found: {job.content_id}")
+                    logger.error("Content not found for publish attempt_id=%s content_id=%s", attempt_id, job.content_id)
                     attempt.status = "failed"
                     attempt.error = "Content not found"
+                    await db.flush()
+                    await sync_job_publish_status(db, job.content_id)
                     await db.commit()
                     return
-                
+
                 # Update status to processing
                 attempt.status = "retrying" if job.retry_count > 0 else "pending"
                 await db.commit()
-            
+
+            previous_access_token_encrypted = channel.access_token_encrypted
+
             # Wait for rate limit
             await self.wait_for_rate_limit()
-            
+
+            # If a scheduled time already elapsed (e.g., during retry backoff or manual retry),
+            # publish immediately so Buffer does not reject a past dueAt.
+            effective_schedule_at = (
+                job.schedule_at
+                if job.schedule_at and job.schedule_at > datetime.now(timezone.utc)
+                else None
+            )
+
             # Publish
             result = await self._publisher.publish(
                 channel=channel,
                 content=content,
                 image_url=job.image_url,
                 text=job.text,
-                schedule_at=job.schedule_at,
+                schedule_at=effective_schedule_at,
             )
-            
+
             async with AsyncSessionLocal() as db:
+                await persist_refreshed_channel_tokens(db, channel, previous_access_token_encrypted)
                 attempt = await db.get(PublishAttempt, attempt_id)
                 if not attempt:
+                    await db.commit()
                     return
-                
+
                 if result.success:
                     attempt.status = "sent"
                     attempt.external_post_id = result.external_post_id
                     attempt.published_at = datetime.now(timezone.utc)
                     attempt.error = None
-                    logger.info(f"Published successfully: {attempt_id} -> {result.external_post_id}")
+                    logger.info("Published successfully attempt_id=%s external_post_id=%s", attempt_id, result.external_post_id)
                 else:
                     # Handle failure
                     error_code = result.error_code or "UNKNOWN"
                     attempt.error = f"{error_code}: {result.error}"
                     attempt.retry_count = job.retry_count
-                    
+                    logger.warning("Publish attempt failed attempt_id=%s code=%s error=%s retry=%s", attempt_id, error_code, result.error, job.retry_count)
+
                     # Determine if we should retry
                     should_retry = job.retry_count < job.max_retries and error_code in [
                         "RATE_LIMITED",
@@ -340,30 +397,34 @@ class PublishingQueue:
                         "API_ERROR",
                         "UNKNOWN_ERROR",
                     ]
-                    
+
                     if should_retry:
                         attempt.status = "retrying"
                         # Calculate exponential backoff: 2^retry * 60 seconds
                         delay = min(2 ** job.retry_count * 60, 3600)  # Max 1 hour
-                        logger.info(f"Scheduling retry for {attempt_id} in {delay}s (attempt {job.retry_count + 1})")
+                        logger.info("Scheduling retry attempt_id=%s delay_s=%s next_retry=%s", attempt_id, delay, job.retry_count + 1)
                         await self.requeue(job, delay=delay)
                     else:
                         attempt.status = "failed"
                         await self.move_to_dead_letter(job, result.error or "Unknown error")
-                        logger.error(f"Publish failed permanently: {attempt_id} - {result.error}")
-                
+                        logger.error("Publish failed permanently attempt_id=%s code=%s error=%s", attempt_id, error_code, result.error)
+
+                await db.flush()
+                await sync_job_publish_status(db, job.content_id)
                 await db.commit()
-        
+
         except Exception as e:
-            logger.exception(f"Error processing job {attempt_id}: {e}")
+            logger.exception("Error processing publish job attempt_id=%s: %s", attempt_id, e)
             async with AsyncSessionLocal() as db:
                 attempt = await db.get(PublishAttempt, attempt_id)
                 if attempt:
                     attempt.status = "failed"
                     attempt.error = f"Processing error: {str(e)}"
+                    await db.flush()
+                    await sync_job_publish_status(db, job.content_id)
                     await db.commit()
             await self.move_to_dead_letter(job, str(e))
-        
+
         finally:
             await self.mark_done(attempt_id)
     
@@ -386,7 +447,9 @@ class PublishingQueue:
                 await asyncio.sleep(poll_interval)
     
     def start_worker_task(self, poll_interval: float = 2.0) -> asyncio.Task:
-        """Start worker as asyncio task."""
+        """Start worker as asyncio task if not already running."""
+        if self._worker_task and not self._worker_task.done():
+            return self._worker_task
         self._worker_task = asyncio.create_task(self.start_worker(poll_interval))
         return self._worker_task
     

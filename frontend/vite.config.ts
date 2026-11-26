@@ -1,20 +1,21 @@
 import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import path from 'path'
+import reactOx from '@vitejs/plugin-react-oxc'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [reactOx()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': (import.meta as any).dirname + '/src',
     },
   },
   server: {
     port: 5173,
+    allowedHosts: ['hardened-desktop-darn.ngrok-free.dev', 'localhost'],
     proxy: {
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+        ws: true,
       },
     },
   },

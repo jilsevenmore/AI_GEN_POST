@@ -45,6 +45,8 @@ ai-gen-post/
 
 ## Getting Started
 
+> For Step 02/03 launch setup and verification (landing/SEO/pixels, Buffer/Cloudinary/Redis, E2E publish), see [`docs/STEP_02_03_SETUP_VERIFICATION.md`](docs/STEP_02_03_SETUP_VERIFICATION.md).
+
 ### Prerequisites
 
 - Python 3.11+

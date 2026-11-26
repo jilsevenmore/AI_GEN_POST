@@ -1,7 +1,7 @@
 """LangGraph state definitions for the AI generation flow."""
 from typing import List, Optional, Dict, Any, Literal
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 
 
@@ -20,6 +20,7 @@ class BrandKitData(BaseModel):
 class JobInput(BaseModel):
     """Input parameters from the user."""
     job_id: UUID
+    company_id: UUID
     type: Literal["blog", "post"]
     title: str
     topic: str
@@ -30,22 +31,39 @@ class JobInput(BaseModel):
     platforms: List[str] = Field(default_factory=list)
     use_references: bool = True
     reference_image_ids: List[UUID] = Field(default_factory=list)
+    source_context: Optional[str] = Field(
+        None, description="Extracted text from an attached source document used as generation context."
+    )
+    instagram_post_type: Optional[str] = Field(
+        None, description="Instagram post type: feed, story, or reel."
+    )
+    instagram_cover_image_url: Optional[str] = Field(
+        None, description="Cover image URL for Instagram stories/reels."
+    )
+    aspect_ratios: Optional[List[str]] = Field(
+        default_factory=list,
+        description="User-requested image aspect ratios. Empty = auto-select based on platforms.",
+    )
+    generate_image: bool = Field(
+        default=False,
+        description="Whether to generate an image alongside the content. If false, image generation is skipped entirely.",
+    )
 
 
 class TextBrief(BaseModel):
     """Detailed brief for text generation."""
-    outline: str
-    key_points: List[str]
-    target_length: int
-    style_guidance: str
+    outline: str = ""
+    key_points: List[str] = Field(default_factory=list)
+    target_length: int = 500
+    style_guidance: str = "Professional"
 
 
 class ImageBrief(BaseModel):
     """Detailed brief for image generation."""
-    prompt: str
-    style_keywords: List[str]
-    composition_guidance: str
-    aspect_ratio: str
+    prompt: str = ""
+    style_keywords: List[str] = Field(default_factory=list)
+    composition_guidance: str = "Clean, centered composition"
+    aspect_ratio: str = "1:1"
     reference_roles: Dict[str, str] = Field(default_factory=dict)  # image_id -> role
 
 
@@ -80,6 +98,9 @@ class ImageVariant(BaseModel):
 
 class GenerationState(BaseModel):
     """Complete state for the LangGraph flow."""
+    model_config = ConfigDict(protected_namespaces=())
+    
+    """Complete state for the LangGraph flow."""
     # Input
     job_input: JobInput
     brand_kit: BrandKitData
@@ -102,8 +123,16 @@ class GenerationState(BaseModel):
     long_text: Optional[str] = None  # For blog/LinkedIn
     
     # Step 4: Safety check
-    safety_passed: bool = True
+    safety_check_passed: bool = True
     safety_flags: List[str] = Field(default_factory=list)
+
+    @property
+    def safety_passed(self) -> bool:
+        return self.safety_check_passed
+
+    @safety_passed.setter
+    def safety_passed(self, value: bool) -> None:
+        self.safety_check_passed = value
     
     # Step 5: Adapt per platform
     platform_contents: List[PlatformContent] = Field(default_factory=list)

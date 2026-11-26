@@ -12,7 +12,17 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatResult, ChatGeneration
 
-from app.core.config import get_settings
+from app.core.config import get_settings, init_langsmith
+from app.core.logging import (
+    RequestContext,
+    log_llm_call,
+    log_llm_error,
+    log_llm_fallback,
+    log_llm_response,
+)
+
+# Initialize LangSmith tracing before any LLM is instantiated
+init_langsmith()
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -33,7 +43,7 @@ class ModelConfig:
     base_url: str
     supports_json: bool = True
     supports_tools: bool = True
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.7
 
 
@@ -195,51 +205,132 @@ class ModelRouter:
     ) -> ChatResult:
         """
         Invoke with automatic fallback.
-        
+
         Args:
             messages: Chat messages
             require_json: Need JSON response
             require_tools: Need tool calling
             company_openai_only: Company setting to force OpenAI
         """
+        request_id = RequestContext.get_request_id()
+
         # If company forces OpenAI or global circuit open, use OpenAI directly
         if company_openai_only or self._check_global_circuit():
             if self._openai_model:
                 self.metrics["openai_fallbacks"] += 1
-                return await self._try_model(self._openai_model, messages, require_json, require_tools)
+                logger.info(
+                    "Routing to OpenAI (company_openai_only=%s, global_circuit=%s)",
+                    company_openai_only,
+                    self._global_circuit_open,
+                )
+                return await self._invoke_with_logging(
+                    self._openai_model, messages, require_json, require_tools, request_id
+                )
             raise RuntimeError("OpenAI fallback not configured")
-        
+
         # Try free models first
+        last_model: Optional[str] = None
         for model_config in self._free_models:
             # Skip if circuit breaker open for this model
             cb = self._get_circuit_breaker(model_config.name)
             if cb.is_open:
                 continue
-            
+            last_model = model_config.name
+
             try:
-                result = await self._try_model(model_config, messages, require_json, require_tools)
-                self._record_success(model_config.name)
-                self.metrics["free_requests"] += 1
-                return result
+                return await self._invoke_with_logging(
+                    model_config, messages, require_json, require_tools, request_id
+                )
             except Exception as e:
-                logger.warning(f"Free model {model_config.name} failed: {e}")
+                logger.warning("Free model %s failed: %s", model_config.name, e)
                 self._record_failure(model_config.name)
                 self.metrics["errors"] += 1
-                
+
                 # Check if we should fallback to OpenAI
                 if self._should_fallback(e):
                     if self._openai_model:
-                        logger.info(f"Falling back to OpenAI after free model failure")
+                        log_llm_fallback(
+                            model_config.name,
+                            self._openai_model.name,
+                            str(e),
+                            request_id=request_id,
+                        )
+                        logger.info("Falling back to OpenAI after free model failure")
                         self.metrics["openai_fallbacks"] += 1
-                        return await self._try_model(self._openai_model, messages, require_json, require_tools)
-        
+                        return await self._invoke_with_logging(
+                            self._openai_model, messages, require_json, require_tools, request_id
+                        )
+
         # All free models failed, try OpenAI
         if self._openai_model:
+            log_llm_fallback(
+                last_model or "free_models",
+                self._openai_model.name,
+                "all free models failed or circuit open",
+                request_id=request_id,
+            )
             self.metrics["openai_fallbacks"] += 1
-            return await self._try_model(self._openai_model, messages, require_json, require_tools)
-        
+            return await self._invoke_with_logging(
+                self._openai_model, messages, require_json, require_tools, request_id
+            )
+
         raise RuntimeError("All models failed and no OpenAI fallback available")
-    
+
+    def _last_message_text(self, messages: List[BaseMessage]) -> str:
+        """Extract text from the last message for LLM call logging."""
+        if not messages:
+            return ""
+        content = getattr(messages[-1], "content", "")
+        if isinstance(content, list):
+            content = " ".join(str(part) for part in content)
+        return str(content)
+
+    async def _invoke_with_logging(
+        self,
+        config: ModelConfig,
+        messages: List[BaseMessage],
+        require_json: bool,
+        require_tools: bool,
+        request_id: Optional[str],
+    ) -> ChatResult:
+        """Invoke a single model with structured LLM call/response/error logging."""
+        provider = config.provider.value
+        model = config.name
+        prompt = self._last_message_text(messages)
+
+        log_llm_call(
+            provider,
+            model,
+            prompt=prompt,
+            request_id=request_id,
+            require_json=require_json,
+        )
+
+        start = time.perf_counter()
+        try:
+            result = await self._try_model(config, messages, require_json, require_tools)
+            response_text = result.generations[0].text if result.generations else ""
+            log_llm_response(
+                provider,
+                model,
+                response=response_text,
+                latency_ms=(time.perf_counter() - start) * 1000,
+                request_id=request_id,
+            )
+            self._record_success(config.name)
+            if config.provider == ModelProvider.OPENROUTER_FREE:
+                self.metrics["free_requests"] += 1
+            return result
+        except Exception as e:
+            log_llm_error(
+                provider,
+                model,
+                e,
+                latency_ms=(time.perf_counter() - start) * 1000,
+                request_id=request_id,
+            )
+            raise
+
     def _should_fallback(self, error: Exception) -> bool:
         """Determine if error should trigger fallback."""
         error_str = str(error).lower()
@@ -265,10 +356,13 @@ class ModelRouter:
         # Add timeout via asyncio
         import asyncio
         try:
-            return await asyncio.wait_for(
+            # ainvoke returns AIMessage in newer LangChain, wrap in ChatResult for compatibility
+            response = await asyncio.wait_for(
                 model.ainvoke(messages),
                 timeout=60.0,  # 60 second timeout
             )
+            # Wrap AIMessage in ChatResult format expected by nodes
+            return ChatResult(generations=[ChatGeneration(message=response)])
         except asyncio.TimeoutError:
             raise RuntimeError(f"Model {config.name} timed out")
     

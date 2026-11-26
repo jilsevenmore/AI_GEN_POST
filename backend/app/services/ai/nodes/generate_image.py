@@ -2,13 +2,26 @@
 import logging
 import uuid
 import base64
+import time
 import httpx
 from typing import List, Optional
+from langsmith import traceable
 from app.services.ai.state import GenerationState, ImageVariant, ReferenceImage
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Platform-specific allowed aspect ratios for feed/image posts (based on official docs)
+# Instagram feed image (Graph API): 4:5 to 1.91:1 range
+# LinkedIn single image post: 3:1 to 4:5 (width:height)
+# Facebook feed photo: commonly supported 1:1, 4:5, 1.91:1 (9:16 is story/reel oriented)
+PLATFORM_ALLOWED_ASPECT_RATIOS = {
+    "instagram": ["1:1", "4:5", "1.91:1"],
+    "facebook": ["1:1", "4:5", "1.91:1"],
+    "linkedin": ["1:1", "4:5", "1.91:1"],
+}
+ALL_ASPECT_RATIOS = ["1:1", "4:5", "1.91:1", "9:16"]
 
 
 async def generate_image_node(state: GenerationState) -> GenerationState:
@@ -23,8 +36,9 @@ async def generate_image_node(state: GenerationState) -> GenerationState:
     
     variants: List[ImageVariant] = []
     
-    # Determine aspect ratios based on platforms
-    aspect_ratios = _get_aspect_ratios(job.platforms)
+    # Determine aspect ratios: user-specified ratios take precedence,
+    # otherwise auto-select based on platforms.
+    aspect_ratios = _get_aspect_ratios(job.platforms, user_ratios=job.aspect_ratios)
     
     # Prepare reference images for Sunburst
     reference_images = _prepare_references(state.reference_images)
@@ -55,26 +69,47 @@ async def generate_image_node(state: GenerationState) -> GenerationState:
     return state
 
 
-def _get_aspect_ratios(platforms: List[str]) -> List[str]:
-    """Determine needed aspect ratios from platforms."""
+def _get_aspect_ratios(
+    platforms: List[str],
+    user_ratios: Optional[List[str]] = None,
+) -> List[str]:
+    """Determine needed aspect ratios from platforms.
+
+    Filters to ratios allowed for the selected platforms based on official docs:
+    - Instagram feed images (API): 4:5 to 1.91:1 (1:1, 4:5, 1.91:1)
+    - LinkedIn single image posts: 3:1 to 4:5 width:height (1:1, 4:5, 1.91:1)
+    - Facebook feed images: commonly 1:1, 4:5, 1.91:1 (9:16 is story/reel oriented)
+    """
+    priority = ["1:1", "4:5", "1.91:1", "9:16"]
+
+    if platforms:
+        allowed_sets = [set(PLATFORM_ALLOWED_ASPECT_RATIOS.get(p, ALL_ASPECT_RATIOS)) for p in platforms]
+        allowed = set.intersection(*allowed_sets) if allowed_sets else set(ALL_ASPECT_RATIOS)
+    else:
+        allowed = set(ALL_ASPECT_RATIOS)
+    if not allowed:
+        allowed = {"1:1"}
+
+    if user_ratios:
+        ratios = {r for r in user_ratios if r in allowed}
+        if ratios:
+            return [r for r in priority if r in ratios][:3]
+
+    # Auto-select based on platforms, constrained by allowed set
     ratios = set()
     for platform in platforms:
         if platform == "instagram":
-            ratios.add("1:1")  # Square for feed
-            ratios.add("4:5")  # Portrait for feed
-            ratios.add("9:16")  # Stories/Reels
+            ratios.update({"1:1", "4:5"})
         elif platform == "facebook":
-            ratios.add("1:1")
-            ratios.add("4:5")
+            ratios.update({"1:1", "4:5"})
         elif platform == "linkedin":
-            ratios.add("1.91:1")  # Landscape for feed
-            ratios.add("1:1")
-    
-    # Always include square as default
-    ratios.add("1:1")
-    
+            ratios.update({"1.91:1", "1:1"})
+    ratios &= allowed
+
+    if not ratios:
+        ratios = {"1:1"} & allowed or {"1:1"}
+
     # Return max 3 variants (primary + 2)
-    priority = ["1:1", "4:5", "1.91:1", "9:16"]
     return [r for r in priority if r in ratios][:3]
 
 
@@ -130,12 +165,12 @@ async def _generate_single_image(
 
 
 def _aspect_to_dimensions(aspect_ratio: str) -> tuple:
-    """Convert aspect ratio to pixel dimensions."""
+    """Convert aspect ratio to pixel dimensions divisible by 16 (required by Sunburst API)."""
     ratios = {
-        "1:1": (1024, 1024),
-        "4:5": (1024, 1280),
-        "1.91:1": (1024, 536),
-        "9:16": (576, 1024),
+        "1:1": (1024, 1024),      # Universal square (IG/FB/LinkedIn)
+        "4:5": (1024, 1280),      # Instagram/Facebook portrait feed (exact 4:5)
+        "1.91:1": (1200, 624),    # LinkedIn/Facebook landscape (~1.91:1)
+        "9:16": (1008, 1792),     # Stories/Reels (exact 9:16)
     }
     return ratios.get(aspect_ratio, (1024, 1024))
 
@@ -157,25 +192,122 @@ def _build_image_prompt(base_prompt: str, aspect_ratio: str, brand) -> str:
     return " | ".join(parts)
 
 
+@traceable(name="sunburst_image_generation", run_type="llm")
 async def _call_sunburst_api(
     prompt: str,
     size: str,
     reference_images: List[dict],
 ) -> str:
     """
-    Call GPT Image 2.5 Sunburst API.
+    Call GPT Image 2.5 Sunburst API using OpenAI-compatible endpoint.
     
-    Note: This uses the OpenAI-compatible endpoint. In production,
-    you would use the actual Sunburst endpoint.
+    Uses the user's detailed enhanced prompt to generate images matching
+    their specific description (e.g., "Professional CRM software dashboard...").
     """
-    # For now, return a placeholder - real implementation would call:
-    # POST https://api.openai.com/v1/images/generations (or Sunburst endpoint)
-    # with model="gpt-image-2.5-sunburst"
+    import httpx
+    from app.core.config import get_settings
     
-    # Placeholder using picsum for development
-    import random
-    seed = random.randint(1, 1000000)
-    return f"https://picsum.photos/seed/ai-gen-{seed}/{size.split('x')[0]}/{size.split('x')[1]}"
+    settings = get_settings()
+
+    if not settings.SUNBURST_API_KEY:
+        raise RuntimeError("SUNBURST_API_KEY not configured")
+
+    from app.core.logging import log_llm_call, log_llm_error, log_llm_response
+
+    sunburst_model = settings.SUNBURST_MODEL
+    start = time.perf_counter()
+    log_llm_call("sunburst", sunburst_model, prompt=prompt)
+
+    headers = {
+        "Authorization": f"Bearer {settings.SUNBURST_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    
+    payload = {
+        "model": settings.SUNBURST_MODEL,  # "gpt-image-2.5-sunburst"
+        "prompt": prompt,
+        "size": size,
+        "n": 1,
+    }
+    
+    # Add reference images if available (Sunburst supports up to 16 refs)
+    if reference_images:
+        payload["reference_images"] = reference_images[:16]
+    
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        try:
+            response = await client.post(
+                f"{settings.SUNBURST_BASE_URL}/images/generations",
+                headers=headers,
+                json=payload,
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(f"Sunburst API error {response.status_code}: {response.text}")
+
+            result = response.json()
+
+            # Handle different response formats (url or b64_json)
+            data_item = result.get("data", [{}])[0]
+            image_url = data_item.get("url")
+
+            if not image_url:
+                # Try b64_json format (Sunburst may return base64)
+                b64_json = data_item.get("b64_json")
+                if b64_json:
+                    # Upload to Cloudinary when configured so Buffer/other platforms can fetch it
+                    image_url = _upload_image_to_cloudinary(b64_json)
+                    if not image_url:
+                        image_url = f"data:image/png;base64,{b64_json}"
+                else:
+                    raise RuntimeError("Sunburst API returned no image URL or b64_json")
+
+            log_llm_response(
+                "sunburst",
+                sunburst_model,
+                response=f"image_url={image_url}",
+                latency_ms=(time.perf_counter() - start) * 1000,
+            )
+            return image_url
+        except Exception as e:
+            log_llm_error(
+                "sunburst",
+                sunburst_model,
+                e,
+                latency_ms=(time.perf_counter() - start) * 1000,
+            )
+            raise
+
+
+def _upload_image_to_cloudinary(b64_data: str) -> Optional[str]:
+    """Upload base64 image data to Cloudinary and return a public https URL."""
+    if not (settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET):
+        logger.warning("Cloudinary not configured; keeping image as base64 data URL")
+        return None
+    try:
+        import cloudinary
+        import cloudinary.uploader
+
+        cloudinary.config(
+            cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+            api_key=settings.CLOUDINARY_API_KEY,
+            api_secret=settings.CLOUDINARY_API_SECRET,
+            secure=True,
+        )
+        # Accept raw base64 or data URL
+        if b64_data.startswith("data:"):
+            payload = b64_data
+        else:
+            payload = f"data:image/png;base64,{b64_data}"
+        folder = settings.CLOUDINARY_FOLDER_PUBLISHED or "published"
+        res = cloudinary.uploader.upload(payload, folder=folder, resource_type="image")
+        url = res.get("secure_url") or res.get("url")
+        if url:
+            logger.info(f"Uploaded generated image to Cloudinary: {url}")
+        return url
+    except Exception as e:
+        logger.error(f"Cloudinary upload failed, falling back to base64: {e}")
+        return None
 
 
 def _create_placeholder_variant(aspect_ratio: str) -> ImageVariant:

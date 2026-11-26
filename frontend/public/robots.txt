@@ -1,0 +1,14 @@
+User-agent: *
+Allow: /
+Disallow: /dashboard
+Disallow: /leads/
+Disallow: /create/
+Disallow: /review/
+Disallow: /library
+Disallow: /brand
+Disallow: /publish/
+Disallow: /settings
+Disallow: /beta/
+Disallow: /auth/
+
+Sitemap: https://evenmoreinfotech.com/sitemap.xml

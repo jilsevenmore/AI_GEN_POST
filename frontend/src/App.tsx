@@ -1,7 +1,9 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
+import { ResetPasswordPage } from './pages/ResetPasswordPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { JobFormPage } from './pages/JobFormPage'
 import { ReviewPage } from './pages/ReviewPage'
@@ -12,6 +14,7 @@ import { SettingsPage } from './pages/SettingsPage'
 import { LegalPage } from './pages/LegalPage'
 import { OnboardingPage } from './pages/OnboardingPage'
 import { BetaDashboardPage } from './pages/BetaDashboardPage'
+import { BufferCallbackPage } from './pages/BufferCallbackPage'
 import { useAuth } from './hooks/useAuth'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -52,35 +55,53 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/login" element={
-        <PublicRoute>
-          <LoginPage />
-        </PublicRoute>
-      } />
-      <Route path="/register" element={
-        <PublicRoute>
-          <RegisterPage />
-        </PublicRoute>
-      } />
-      <Route path="/" element={
-        <ProtectedRoute>
-          <Layout />
-        </ProtectedRoute>
-      }>
-        <Route index element={<DashboardPage />} />
-        <Route path="dashboard" element={<DashboardPage />} />
-        <Route path="create/:type" element={<JobFormPage />} />
-        <Route path="review/:jobId" element={<ReviewPage />} />
-        <Route path="library" element={<LibraryPage />} />
-        <Route path="brand" element={<BrandKitPage />} />
-        <Route path="publish/:contentId" element={<PublishPage />} />
-        <Route path="settings" element={<SettingsPage />} />
-        <Route path="legal/:page" element={<LegalPage />} />
-        <Route path="beta/onboarding/:userId" element={<OnboardingPage />} />
-        <Route path="beta/dashboard" element={<BetaDashboardPage />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
-    </Routes>
+    <>
+      <Routes>
+        {/* Public auth routes */}
+        <Route path="/login" element={
+          <PublicRoute>
+            <LoginPage />
+          </PublicRoute>
+        } />
+        <Route path="/register" element={
+          <PublicRoute>
+            <RegisterPage />
+          </PublicRoute>
+        } />
+        <Route path="/forgot-password" element={
+          <PublicRoute>
+            <ForgotPasswordPage />
+          </PublicRoute>
+        } />
+        <Route path="/reset-password" element={
+          <PublicRoute>
+            <ResetPasswordPage />
+          </PublicRoute>
+        } />
+
+        {/* OAuth callbacks */}
+        <Route path="/auth/buffer/callback" element={<BufferCallbackPage />} />
+
+        {/* Protected app routes */}
+        <Route path="/" element={
+          <ProtectedRoute>
+            <Layout />
+          </ProtectedRoute>
+        }>
+          <Route index element={<DashboardPage />} />
+          <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="create/:type" element={<JobFormPage />} />
+          <Route path="review/:jobId" element={<ReviewPage />} />
+          <Route path="library" element={<LibraryPage />} />
+          <Route path="brand" element={<BrandKitPage />} />
+          <Route path="publish/:contentId" element={<PublishPage />} />
+          <Route path="settings" element={<SettingsPage />} />
+          <Route path="legal/:page" element={<LegalPage />} />
+          <Route path="beta/onboarding/:userId" element={<OnboardingPage />} />
+          <Route path="beta/dashboard" element={<BetaDashboardPage />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </>
   )
 }

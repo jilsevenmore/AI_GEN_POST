@@ -1,9 +1,9 @@
 """Main LangGraph flow for AI content generation."""
 import logging
-from typing import Dict, Any, Literal
+from typing import Dict, Any, Literal, Optional
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+# from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # Disabled due to psycopg issues
 from app.services.ai.state import GenerationState, StateDict, create_initial_state
 from app.services.ai.nodes.expand_prompt import expand_prompt_node
 from app.services.ai.nodes.find_references import find_references_node
@@ -46,6 +46,14 @@ def should_regenerate(state: GenerationState) -> Literal["regenerate_text", "reg
     return "continue"
 
 
+def should_generate_image(state: GenerationState) -> Literal["generate_image", "skip_image"]:
+    """Decide whether to generate an image based on user toggle."""
+    # User toggle takes precedence: if they disabled image generation, skip it
+    if not state.job_input.generate_image:
+        return "skip_image"
+    return "generate_image"
+
+
 def create_generation_graph() -> StateGraph:
     """Create the LangGraph for content generation."""
     
@@ -56,6 +64,7 @@ def create_generation_graph() -> StateGraph:
     graph.add_node("find_references", find_references_node)
     graph.add_node("generate_text", generate_text_node)
     graph.add_node("generate_image", generate_image_node)
+    graph.add_node("skip_image", lambda state: state)  # Pass-through for blog posts
     graph.add_node("safety_check", safety_check_node)
     graph.add_node("adapt_platforms", adapt_platforms_node)
     
@@ -64,11 +73,17 @@ def create_generation_graph() -> StateGraph:
     
     graph.add_edge("expand_prompt", "find_references")
     graph.add_edge("find_references", "generate_text")
-    graph.add_edge("find_references", "generate_image")  # Parallel
     
-    # Both generation nodes must complete before safety check
+    # Conditional: generate image for social posts, skip for blogs
+    graph.add_conditional_edges(
+        "find_references",
+        should_generate_image,
+    )
+    
+    # Both generation paths converge at safety_check
     graph.add_edge("generate_text", "safety_check")
     graph.add_edge("generate_image", "safety_check")
+    graph.add_edge("skip_image", "safety_check")
     
     graph.add_edge("safety_check", "adapt_platforms")
     graph.add_edge("adapt_platforms", END)
@@ -89,60 +104,218 @@ def get_generation_graph() -> StateGraph:
     if _generation_graph is None:
         graph = create_generation_graph()
         
-        # Use Postgres checkpointer for persistence
-        try:
-            checkpointer = AsyncPostgresSaver.from_conn_string(str(engine.url))
-            _generation_graph = graph.compile(checkpointer=checkpointer)
-        except Exception as e:
-            logger.warning(f"Could not create Postgres checkpointer, using memory: {e}")
-            _generation_graph = graph.compile(checkpointer=MemorySaver())
+        # Use MemorySaver for checkpointing (Postgres checkpointer disabled due to psycopg issues)
+        _generation_graph = graph.compile(checkpointer=MemorySaver())
     
     return _generation_graph
 
 
 async def run_generation_job(
-    job_input,
-    brand_kit,
-    db,
+    job_id_str: str,
+    company_id_str: str,
+    db_session_factory,
+    user_feedback: Optional[str] = None,
+    regenerate_text: bool = False,
+    regenerate_image: bool = False,
+    new_reference_ids: list = None,
 ) -> GenerationState:
     """
     Run the complete generation job as a background task.
     
     This is called from the jobs endpoint via BackgroundTasks.
+    Accepts job_id and company_id as strings (avoids Pydantic serialization issues),
+    then re-queries the database for full job and brand kit data.
+    
+    Optional regeneration parameters are applied to the initial state so a
+    review-driven regeneration can incorporate user feedback.
     """
-    graph = get_generation_graph()
+    from app.db.session import AsyncSessionLocal
+    from app.models.job import Job
+    from app.models.brand_kit import BrandKit
+    from sqlalchemy import select, update
+    from uuid import UUID
+    from app.services.ai.state import JobInput, BrandKitData
+    from datetime import datetime, timezone
     
-    # Create initial state
-    initial_state = create_initial_state(job_input, brand_kit)
-    state_dict = initial_state.model_dump()
+    job_id = UUID(job_id_str)
+    company_id = UUID(company_id_str)
     
-    # Configure for this run
-    config = {
-        "configurable": {
-            "thread_id": str(job_input.job_id),
-        }
-    }
+    logger.info(f"🚀 Starting generation job {job_id} (company={company_id})")
     
-    try:
-        # Run the graph
-        final_state_dict = await graph.ainvoke(state_dict, config=config)
-        final_state = GenerationState.model_validate(final_state_dict)
+    # Create a fresh DB session (the request session is closed by now)
+    async with AsyncSessionLocal() as db:
+        # Query the job from database
+        result = await db.execute(select(Job).where(Job.id == job_id))
+        db_job = result.scalar_one_or_none()
+        if not db_job:
+            logger.error(f"❌ Job {job_id} not found in database")
+            raise RuntimeError(f"Job {job_id} not found")
         
-        # Save results to database
-        await _save_results(final_state, db)
+        # Query brand kit from database
+        brand_result = await db.execute(
+            select(BrandKit).where(BrandKit.company_id == company_id)
+        )
+        brand_kit_model = brand_result.scalar_one_or_none()
+        if not brand_kit_model:
+            # Create default brand kit
+            brand_kit_model = BrandKit(company_id=company_id, company_name="Demo Company")
+            db.add(brand_kit_model)
+            await db.commit()
+            await db.refresh(brand_kit_model)
         
-        return final_state
+        # Build JobInput from database record
+        job_input = JobInput(
+            job_id=db_job.id,
+            company_id=company_id,
+            type=db_job.type,
+            title=db_job.title,
+            topic=db_job.topic,
+            tone=db_job.tone,
+            audience=db_job.audience,
+            keywords=db_job.keywords or [],
+            image_description=db_job.image_description,
+            platforms=db_job.platforms or [],
+            use_references=db_job.use_references,
+            reference_image_ids=db_job.reference_image_ids or [],
+            source_context=db_job.source_context_text,
+            instagram_post_type=db_job.instagram_post_type,
+            instagram_cover_image_url=db_job.instagram_cover_image_url,
+            aspect_ratios=db_job.aspect_ratios or [],
+            generate_image=db_job.generate_image,
+        )
         
-    except Exception as e:
-        logger.error(f"Generation job failed: {e}")
-        initial_state.error = str(e)
-        initial_state.current_step = "failed"
-        initial_state.progress = 0
-        await _save_error(initial_state, db)
-        return initial_state
+        brand_kit_data = BrandKitData(
+            company_name=brand_kit_model.company_name or "Demo Company",
+            tagline=brand_kit_model.tagline,
+            address=brand_kit_model.address,
+            logo_url=str(brand_kit_model.logo_url) if brand_kit_model.logo_url else None,
+            primary_color=brand_kit_model.primary_color,
+            secondary_color=brand_kit_model.secondary_color,
+            tone=brand_kit_model.tone,
+            use_openai_only=brand_kit_model.use_openai_only,
+        )
+        
+        logger.info(f"📋 Loaded job {job_id}: type={db_job.type}, topic={db_job.topic}")
+        logger.info(f"🎨 Loaded brand kit: {brand_kit_data.company_name}")
+        
+        # Create initial state using Pydantic models
+        initial_state = create_initial_state(job_input, brand_kit_data)
+
+        # Apply regeneration feedback if provided, so a review-driven
+        # regeneration carries the user's instructions into the state.
+        if user_feedback:
+            initial_state.user_feedback = user_feedback
+            initial_state.regenerate_text = regenerate_text
+            initial_state.regenerate_image = regenerate_image
+            initial_state.new_reference_ids = new_reference_ids or []
+            initial_state.regeneration_count += 1
+
+        # Call AI nodes directly (bypasses LangGraph Pydantic serialization issues)
+        from app.services.ai.nodes.expand_prompt import expand_prompt_node
+        from app.services.ai.nodes.find_references import find_references_node
+        from app.services.ai.nodes.generate_text import generate_text_node
+        from app.services.ai.nodes.generate_image import generate_image_node
+        from app.services.ai.nodes.safety_check import safety_check_node
+        from app.services.ai.nodes.adapt_platforms import adapt_platforms_node
+        
+        state = initial_state
+
+        from app.services.job_events import publish_job_event
+
+        async def _update_progress(step: str, progress: int, status: str = "pending"):
+            try:
+                await db.execute(
+                    update(Job)
+                    .where(Job.id == job_id)
+                    .values(
+                        status=status,
+                        progress=progress,
+                        current_step=step,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
+                await db.commit()
+                publish_job_event(
+                    str(job_id),
+                    {
+                        "id": str(job_id),
+                        "status": status,
+                        "progress": progress,
+                        "current_step": step,
+                        "error": None,
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update job progress for {job_id}: {e}")
+                await db.rollback()
+        
+        try:
+            await _update_progress("Expanding prompt", 10, "expanding_prompt")
+            logger.info(f"🔄 Step 1: Expanding prompt for job {job_id}")
+            state = await expand_prompt_node(state)
+            
+            if state.job_input.generate_image and state.job_input.use_references:
+                await _update_progress("Finding references", 25, "expanding_prompt")
+                logger.info(f"🔄 Step 2: Finding references for job {job_id}")
+                state = await find_references_node(state, db)
+            else:
+                logger.info(f"⏩ Skipping finding references for job {job_id} (generate_image={state.job_input.generate_image})")
+            
+            await _update_progress("Writing text", 40, "writing_text")
+            logger.info(f"🔄 Step 3a: Generating text for job {job_id}")
+            state = await generate_text_node(state)
+            
+            # Generate image only if generate_image was requested by user
+            should_gen_image = state.job_input.generate_image and (not user_feedback or regenerate_image)
+            if should_gen_image:
+                await _update_progress("Generating image", 60, "generating_image")
+                logger.info(f"🔄 Step 3b: Generating image for job {job_id}")
+                state = await generate_image_node(state)
+            else:
+                logger.info(f"⏩ Skipping image generation for job {job_id} (generate_image={state.job_input.generate_image})")
+                if not state.job_input.generate_image:
+                    state.generated_image_variants = []
+            
+            await _update_progress("Running safety checks", 80, "safety_check")
+            logger.info(f"🔄 Step 4: Safety check for job {job_id}")
+            state = await safety_check_node(state)
+            
+            await _update_progress("Adapting for platforms", 90, "adapting")
+            logger.info(f"🔄 Step 5: Adapting platforms for job {job_id}")
+            state = await adapt_platforms_node(state)
+            
+            logger.info(f"✅ Generation job {job_id} completed successfully")
+            await _save_results(state, db, company_id)
+            return state
+            
+        except Exception as e:
+            logger.error(f"❌ Generation job {job_id} failed: {e}", exc_info=True)
+            await db.execute(
+                update(Job)
+                .where(Job.id == job_id)
+                .values(
+                    status="failed",
+                    progress=0,
+                    current_step="Failed",
+                    error=str(e),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+            publish_job_event(
+                str(job_id),
+                {
+                    "id": str(job_id),
+                    "status": "failed",
+                    "progress": 0,
+                    "current_step": "Failed",
+                    "error": str(e),
+                },
+            )
+            return None
 
 
-async def _save_results(state: GenerationState, db) -> None:
+async def _save_results(state: GenerationState, db, company_id) -> None:
     """Save generation results to database."""
     from app.models.content import Content
     from app.models.job import Job
@@ -153,21 +326,37 @@ async def _save_results(state: GenerationState, db) -> None:
     
     job_id = state.job_input.job_id
     
-    # Create content record
-    content = Content(
-        id=uuid4(),
-        job_id=job_id,
-        company_id=state.job_input.company_id,
-        type="social_post" if state.job_input.type == "post" else "blog",
-        title=state.job_input.title,
-        long_text=state.long_text or "",
-        platform_contents=[pc.model_dump() for pc in state.platform_contents],
-        image_variants=[iv.model_dump() for iv in state.generated_image_variants],
-        primary_image_id=state.generated_image_variants[0].id if state.generated_image_variants else None,
-        safety_check_passed=state.safety_check_passed,
-        safety_flags=state.safety_flags,
-    )
-    db.add(content)
+    # Check if content already exists for this job (e.g. on regeneration or retry)
+    existing_result = await db.execute(select(Content).where(Content.job_id == job_id))
+    content = existing_result.scalar_one_or_none()
+    
+    primary_img_id = state.generated_image_variants[0].id if state.generated_image_variants else None
+    image_variants_json = [iv.model_dump(mode='json') for iv in state.generated_image_variants]
+    platform_contents_json = [pc.model_dump(mode='json') for pc in state.platform_contents]
+
+    if content:
+        content.title = state.job_input.title
+        content.long_text = state.long_text or ""
+        content.platform_contents = platform_contents_json
+        content.image_variants = image_variants_json
+        content.primary_image_id = primary_img_id
+        content.safety_check_passed = state.safety_check_passed
+        content.safety_flags = state.safety_flags
+    else:
+        content = Content(
+            id=uuid4(),
+            job_id=job_id,
+            company_id=company_id,
+            type="social_post" if state.job_input.type == "post" else "blog",
+            title=state.job_input.title,
+            long_text=state.long_text or "",
+            platform_contents=platform_contents_json,
+            image_variants=image_variants_json,
+            primary_image_id=primary_img_id,
+            safety_check_passed=state.safety_check_passed,
+            safety_flags=state.safety_flags,
+        )
+        db.add(content)
     
     # Update job status
     await db.execute(
@@ -183,8 +372,19 @@ async def _save_results(state: GenerationState, db) -> None:
     
     # Save library images (if any approved later)
     # This happens on approve, not here
-    
+
     await db.commit()
+    from app.services.job_events import publish_job_event
+    publish_job_event(
+        str(state.job_input.job_id),
+        {
+            "id": str(state.job_input.job_id),
+            "status": "awaiting_review",
+            "progress": 100,
+            "current_step": "Ready for review",
+            "error": state.error,
+        },
+    )
 
 
 async def _save_error(state: GenerationState, db) -> None:
@@ -205,6 +405,17 @@ async def _save_error(state: GenerationState, db) -> None:
         )
     )
     await db.commit()
+    from app.services.job_events import publish_job_event
+    publish_job_event(
+        str(state.job_input.job_id),
+        {
+            "id": str(state.job_input.job_id),
+            "status": "failed",
+            "progress": 0,
+            "current_step": "Failed",
+            "error": state.error,
+        },
+    )
 
 
 async def resume_after_review(
@@ -216,39 +427,26 @@ async def resume_after_review(
     db,
 ) -> GenerationState:
     """Resume generation after human review with regeneration feedback."""
-    graph = get_generation_graph()
-    
-    # Get current state from checkpoint
-    config = {"configurable": {"thread_id": job_id}}
-    current_state_dict = await graph.aget_state(config)
-    
-    if not current_state_dict:
-        raise ValueError("No saved state found for job")
-    
-    state = GenerationState.model_validate(current_state_dict.values)
-    
-    # Update state with feedback
-    state.user_feedback = feedback
-    state.regenerate_text = regenerate_text
-    state.regenerate_image = regenerate_image
-    state.new_reference_ids = new_reference_ids
-    state.regeneration_count += 1
-    state.awaiting_review = False
-    state.current_step = "regenerating"
-    state.progress = 10
-    
-    # Resume from appropriate point based on what needs regeneration
-    if regenerate_text and regenerate_image:
-        # Restart from expand_prompt with feedback
-        pass  # Would need to modify graph to support this
-    elif regenerate_text:
-        # Restart from generate_text
-        pass
-    elif regenerate_image:
-        # Restart from generate_image
-        pass
-    
-    # For now, re-run full graph with feedback incorporated
-    # In production, you'd use LangGraph's interrupt/resume properly
-    
-    return await run_generation_job(state.job_input, state.brand_kit, db)
+    from uuid import UUID
+    from sqlalchemy import select
+    from app.db.session import AsyncSessionLocal
+    from app.models.job import Job
+
+    job_uuid = UUID(str(job_id))
+    result = await db.execute(select(Job).where(Job.id == job_uuid))
+    db_job = result.scalar_one_or_none()
+
+    if not db_job:
+        raise ValueError(f"Job {job_id} not found")
+
+    # Re-run the generation from the original job input, carrying the
+    # review feedback into the new state so nodes can act on it.
+    return await run_generation_job(
+        str(db_job.id),
+        str(db_job.company_id),
+        AsyncSessionLocal,
+        user_feedback=feedback,
+        regenerate_text=regenerate_text,
+        regenerate_image=regenerate_image,
+        new_reference_ids=new_reference_ids,
+    )

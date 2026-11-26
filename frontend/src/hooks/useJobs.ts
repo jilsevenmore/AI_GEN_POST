@@ -20,7 +20,10 @@ export function useJobPolling(jobId: string | null, enabled: boolean = true) {
   // Query returns AxiosResponse<JobResponse> - we'll extract data in component
   const { data: axiosResponse, isLoading, error, refetch } = useQuery({
     queryKey: ['job', jobId],
-    queryFn: () => jobsApi.get(jobId!),
+    queryFn: () => {
+      if (!jobId) throw new Error('Job ID is required')
+      return jobsApi.get(jobId)
+    },
     enabled: enabled && !!jobId,
     refetchInterval: (query) => {
       // Poll while job is in active status

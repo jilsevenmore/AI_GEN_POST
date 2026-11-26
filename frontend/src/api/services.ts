@@ -1,7 +1,9 @@
 import api from './client'
 import type {
   Token, UserRegister, UserLogin, UserResponse,
-  JobCreate, JobResponse, JobListResponse, JobStatus,
+  ForgotPasswordRequest, ForgotPasswordResponse,
+  ResetPasswordRequest, ResetPasswordResponse,
+  JobCreate, JobResponse, JobListResponse, JobStatus, SourceFileUploadResponse,
   ContentResponse, ReviewResponse, RegenerateRequest, ApproveRequest,
   ChannelConnection, PublishRequest, PublishAttemptResponse,
   BufferConnectResponse, BufferConnectRequest,
@@ -17,6 +19,10 @@ export const authApi = {
   refresh: (refreshToken: string) => api.post<Token>('/auth/refresh', { refresh_token: refreshToken }),
   me: () => api.get<UserResponse>('/auth/me'),
   logout: () => api.post('/auth/logout'),
+  forgotPassword: (data: ForgotPasswordRequest) =>
+    api.post<ForgotPasswordResponse>('/auth/forgot-password', data),
+  resetPassword: (data: ResetPasswordRequest) =>
+    api.post<ResetPasswordResponse>('/auth/reset-password', data),
 }
 
 // Jobs
@@ -26,7 +32,15 @@ export const jobsApi = {
     api.get<JobListResponse>('/jobs', { params }),
   get: (id: string) => api.get<JobResponse>(`/jobs/${id}`),
   cancel: (id: string) => api.delete(`/jobs/${id}`),
+  retry: (id: string) => api.post<JobResponse>(`/jobs/${id}/retry`),
   simulateProgress: (id: string) => api.post<JobResponse>(`/jobs/${id}/simulate-progress`),
+  uploadSourceFile: (jobId: string, file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return api.post<SourceFileUploadResponse>(`/jobs/${jobId}/source-files`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
 }
 
 // Review
@@ -45,8 +59,10 @@ export const publishApi = {
   connectBuffer: (data: BufferConnectRequest) => 
     api.post<ChannelConnection>('/publish/buffer/connect', data),
   disconnectChannel: (channelId: string) => api.delete(`/publish/buffer/channels/${channelId}`),
-  publish: (data: PublishRequest) => 
+  publish: (data: PublishRequest) =>
     api.post<PublishAttemptResponse[]>('/publish', data),
+  schedule: (data: PublishRequest) =>
+    api.post<PublishAttemptResponse[]>('/publish/schedule', data),
   getAttempts: (contentId: string) => 
     api.get<PublishAttemptResponse[]>(`/publish/attempts/${contentId}`),
   retry: (attemptId: string) => 
@@ -120,3 +136,4 @@ export const betaApi = {
   getMetrics: (days?: number) => api.get('/beta/metrics', { params: { days } }),
   getDashboard: () => api.get('/beta/dashboard'),
 }
+

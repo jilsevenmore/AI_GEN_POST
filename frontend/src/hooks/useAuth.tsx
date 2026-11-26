@@ -63,11 +63,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const register = async (email: string, password: string, companyName: string) => {
-    const response = await authApi.register({ email, password, company_name: companyName })
-    setUser(response.data)
-    // Auto-login after registration
-    const tokenResponse = await authApi.login({ email, password })
-    setTokens(tokenResponse.data.access_token, tokenResponse.data.refresh_token)
+    try {
+      const response = await authApi.register({ email, password, company_name: companyName })
+      setUser(response.data)
+      // Auto-login after registration
+      const tokenResponse = await authApi.login({ email, password })
+      setTokens(tokenResponse.data.access_token, tokenResponse.data.refresh_token)
+    } catch (err: unknown) {
+      const axiosError = err as { response?: { data?: { detail?: string } } }
+      throw new Error(axiosError.response?.data?.detail || 'Registration failed. Please try again.')
+    }
   }
 
   const logout = async () => {

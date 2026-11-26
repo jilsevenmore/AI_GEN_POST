@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Optional
@@ -44,15 +45,36 @@ class Settings(BaseSettings):
     OPENROUTER_DAILY_LIMIT: int = 50
     OPENROUTER_RATE_LIMIT_RPM: int = 20
 
-    # OpenAI (Fallback)
+    # OpenAI (Fallback / image generation)
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_FALLBACK_ENABLED: bool = True
+
+    # Hugging Face (Inference Providers / Hub)
+    HF_TOKEN: Optional[str] = None
+    HF_BASE_URL: str = "https://router.huggingface.co/v1"
+    HF_PROMPT_MODEL: str = "MiniMaxAI/MiniMax-M2.7"
+
+    # MiniMax (Prompt enhancement via Hugging Face by default; configurable)
+    MINIMAX_API_KEY: Optional[str] = None
+    MINIMAX_BASE_URL: str = "https://router.huggingface.co/v1"
+    MINIMAX_MODEL: str = "MiniMaxAI/MiniMax-M2.7"
+    MINIMAX_PROMPT_ENHANCE_ENABLED: bool = True
+
+    # Ollama (Local, free prompt enhancement)
+    OLLAMA_BASE_URL: str = "http://localhost:11434/v1"
+    OLLAMA_MODEL: Optional[str] = None  # e.g. qwen2.5:3b-instruct
+    OLLAMA_PROMPT_ENHANCE_ENABLED: bool = False
 
     # GPT Image 2.5 Sunburst
     SUNBURST_API_KEY: Optional[str] = None
     SUNBURST_BASE_URL: str = "https://api.openai.com/v1"
     SUNBURST_MODEL: str = "gpt-image-2.5-sunburst"
+
+    # Embeddings (semantic search, Hugging Face)
+    EMBEDDING_MODEL: str = "BAAI/bge-base-en-v1.5"
+    EMBEDDING_DIMENSIONS: int = 768
+    EMBEDDING_DEVICE: str = "cpu"
 
     # Cloudinary
     CLOUDINARY_CLOUD_NAME: Optional[str] = None
@@ -71,10 +93,18 @@ class Settings(BaseSettings):
     BUFFER_API_BASE: str = "https://api.bufferapp.com/1"
     BUFFER_RATE_LIMIT_RPM: int = 100  # per 15 min per app
 
+    # Advertising Pixels (Step 5)
+    META_PIXEL_ID: Optional[str] = None
+    GOOGLE_MEASUREMENT_ID: Optional[str] = None
+
     # LangSmith
     LANGSMITH_API_KEY: Optional[str] = None
     LANGSMITH_PROJECT: str = "ai-gen-post"
     LANGSMITH_TRACING: bool = True
+
+    # LangChain tracing env vars (LangChain auto-detects LANGCHAIN_* env vars)
+    LANGCHAIN_TRACING_V2: bool = True
+    LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
 
     # Quotas
     DAILY_FREE_REQUESTS_PER_USER: int = 12
@@ -89,6 +119,42 @@ class Settings(BaseSettings):
     ENABLE_BRAND_KIT: bool = True
     ENABLE_BUFFER_PUBLISHING: bool = True
     ENABLE_FREE_MODELS_FIRST: bool = True
+    ENABLE_SAFETY_CHECK: bool = False
+
+    # Email (Password Reset) - Free mailer compatible
+    # Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS in .env to send real emails.
+    # In development, emails are logged to console + reset_codes.log file.
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SMTP_USER: Optional[str] = None
+    SMTP_PASS: Optional[str] = None
+    SMTP_FROM_EMAIL: str = "noreply@aigenpost.local"
+    SMTP_FROM_NAME: str = "AI Gen Post"
+    EMAIL_RESET_CODE_EXPIRE_MINUTES: int = 15
+
+    # Logging (structured JSON; set LOG_JSON=false for plain text)
+    LOG_LEVEL: str = "INFO"
+    LOG_DIR: str = "logs"
+    LOG_TO_FILE: bool = True
+    LOG_JSON: bool = True
+    LOG_ROTATION_MAX_BYTES: int = 10 * 1024 * 1024
+    LOG_ROTATION_BACKUP_COUNT: int = 5
+
+
+def init_langsmith() -> None:
+    """Configure LangChain/LangSmith tracing from settings.
+
+    LangChain auto-detects LANGCHAIN_* environment variables, so we map our
+    Pydantic settings to os.environ before any LLM is instantiated. Call this
+    at app startup (and before model router creation) so every prompt is traced.
+    """
+    settings = get_settings()
+
+    if settings.LANGSMITH_TRACING and settings.LANGSMITH_API_KEY:
+        os.environ["LANGCHAIN_TRACING_V2"] = str(settings.LANGCHAIN_TRACING_V2).lower()
+        os.environ["LANGCHAIN_API_KEY"] = settings.LANGSMITH_API_KEY
+        os.environ["LANGCHAIN_PROJECT"] = settings.LANGSMITH_PROJECT
+        os.environ["LANGCHAIN_ENDPOINT"] = settings.LANGCHAIN_ENDPOINT
 
 
 @lru_cache

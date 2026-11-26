@@ -1,7 +1,6 @@
 from typing import Optional
 from uuid import UUID
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, HTTPException, status, Request
 from jose import jwt, JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -13,19 +12,30 @@ from app.models.company import Company
 
 settings = get_settings()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_PREFIX}/auth/login")
+
+def get_token_from_header(request: Request) -> Optional[str]:
+    """Extract JWT token from Authorization header."""
+    authorization: Optional[str] = request.headers.get("authorization")
+    if authorization is None:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    return token
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    token: Optional[str] = Depends(get_token_from_header),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """Get current authenticated user from JWT token."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
     )
+    
+    if token is None:
+        raise credentials_exception
     
     try:
         payload = decode_token(token)
@@ -83,7 +93,7 @@ async def get_current_company(
 
 
 async def get_optional_user(
-    token: Optional[str] = Depends(oauth2_scheme),
+    token: Optional[str] = Depends(get_token_from_header),
     db: AsyncSession = Depends(get_db),
 ) -> Optional[User]:
     """Get current user if token is valid, otherwise return None."""

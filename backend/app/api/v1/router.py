@@ -1,10 +1,13 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, jobs, review, publish, library, brand, health, legal, beta
+from app.api.v1.endpoints import auth, jobs, logs, review, publish, library, brand, health, legal, beta
 
 api_router = APIRouter()
 
 # Health (no prefix)
 api_router.include_router(health.router, tags=["Health"])
+
+# Frontend log ingestion (centralized in logs/frontend.log)
+api_router.include_router(logs.router, prefix="/logs", tags=["Logs"])
 
 # Auth
 api_router.include_router(auth.router, prefix="/auth", tags=["Auth"])
